@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,8 +16,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/bureau/onboarding-service/internal/config"
 	"github.com/bureau/onboarding-service/internal/controller"
 )
+
+// defaultConfigPath is used when CONFIG_FILE is not set.
+const defaultConfigPath = "config.yml"
 
 // shutdownTimeout bounds how long Run waits for in-flight requests to drain
 // before forcing the server closed.
@@ -27,6 +32,7 @@ const shutdownTimeout = 10 * time.Second
 // agent_docs/onboarding-lld.md §9), they are added here and torn down by Close.
 type Container struct {
 	Router *gin.Engine
+	Cfg    *config.Config
 	// Close tears down peripherals in reverse order of wiring. It is a no-op
 	// for now (no telemetry/DB/redis yet); each teardown is added as the
 	// corresponding peripheral is wired in Wire.
@@ -38,6 +44,16 @@ type Container struct {
 // Wiring order (extended as peripherals are added): config -> telemetry ->
 // mongo -> redis -> repos -> services -> controllers -> router.
 func Wire() (*Container, error) {
+	// config (boot/infra) — path from CONFIG_FILE, default config.yml
+	configPath := os.Getenv("CONFIG_FILE")
+	if configPath == "" {
+		configPath = defaultConfigPath
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
 	// controllers
 	healthCtrl := controller.NewHealthController()
 
@@ -47,6 +63,7 @@ func Wire() (*Container, error) {
 
 	return &Container{
 		Router: r,
+		Cfg:    cfg,
 		Close:  func() error { return nil },
 	}, nil
 }
@@ -55,13 +72,9 @@ func Wire() (*Container, error) {
 // in-flight requests are drained (up to shutdownTimeout) before peripherals are
 // torn down via Container.Close.
 func Run(c *Container) error {
-	// Port comes from the PORT env var with a sane default. Boot/infra config
-	// moves to commons configloader later (see onboarding-lld.md §9); kept
-	// stdlib-only for now.
-	addr := ":8080"
-	if port := os.Getenv("PORT"); port != "" {
-		addr = ":" + port
-	}
+	// Port comes from boot config (configloader), which resolves ${PORT:8080}
+	// — so the PORT env var still overrides, now funneled through config.
+	addr := ":" + c.Cfg.Server.Port
 
 	srv := &http.Server{Addr: addr, Handler: c.Router}
 

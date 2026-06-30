@@ -2,7 +2,10 @@ module github.com/bureau/onboarding-service
 
 go 1.26.3
 
-require github.com/gin-gonic/gin v1.12.0
+require (
+	github.com/Bureau-Inc/bureau-commons-go v1.6.10
+	github.com/gin-gonic/gin v1.12.0
+)
 
 require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
@@ -34,4 +37,5 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
