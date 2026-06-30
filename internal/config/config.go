@@ -12,7 +12,14 @@ type Config struct {
 	Server struct {
 		Port string `yaml:"port"`
 	} `yaml:"server"`
-	Environment string `yaml:"environment"`
+	Environment string          `yaml:"environment"`
+	Telemetry   TelemetryConfig `yaml:"telemetry"`
+}
+
+// TelemetryConfig holds OpenTelemetry settings consumed by commons telemetry.
+type TelemetryConfig struct {
+	ServiceName  string `yaml:"serviceName"`
+	OTLPEndpoint string `yaml:"otlpEndpoint"`
 }
 
 // Load reads the YAML config at path, applying configloader's ${VAR:default}
@@ -24,6 +31,12 @@ func Load(path string) (*Config, error) {
 	}
 	if c.Server.Port == "" {
 		c.Server.Port = "8080" // safety default if file/env yield an empty port
+	}
+	if c.Telemetry.ServiceName == "" {
+		c.Telemetry.ServiceName = "onboarding-service"
+	}
+	if c.Telemetry.OTLPEndpoint == "" {
+		c.Telemetry.OTLPEndpoint = "localhost:4318"
 	}
 	return &c, nil
 }

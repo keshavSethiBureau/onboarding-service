@@ -14,7 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Bureau-Inc/bureau-commons-go/metricx"
+	"github.com/Bureau-Inc/bureau-commons-go/telemetry"
+	telemetryconfig "github.com/Bureau-Inc/bureau-commons-go/telemetry/config"
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 	"github.com/bureau/onboarding-service/internal/config"
 	"github.com/bureau/onboarding-service/internal/controller"
@@ -54,17 +58,34 @@ func Wire() (*Container, error) {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// telemetry (OpenTelemetry) — global tracer provider + propagator. The OTLP
+	// exporter batches in the background, so this succeeds even with no collector.
+	if err := telemetry.Init(
+		telemetryconfig.WithServiceName(cfg.Telemetry.ServiceName),
+		telemetryconfig.WithEndpoint(cfg.Telemetry.OTLPEndpoint),
+	); err != nil {
+		return nil, fmt.Errorf("failed to initialize telemetry: %w", err)
+	}
+
+	// metricx (Prometheus) — registry for the /metrics exposition + HTTP metrics.
+	registry := metricx.NewRegistry()
+
 	// controllers
 	healthCtrl := controller.NewHealthController()
 
-	// router
+	// router: trace + count every request, then register routes.
 	r := gin.Default()
+	r.Use(otelgin.Middleware(cfg.Telemetry.ServiceName))
+	r.Use(controller.MetricsMiddleware(registry))
 	healthCtrl.RegisterRoutes(r)
+	r.GET("/metrics", gin.WrapH(metricx.NewHandler(registry, &metricx.Options{})))
 
 	return &Container{
 		Router: r,
 		Cfg:    cfg,
-		Close:  func() error { return nil },
+		Close: func() error {
+			return telemetry.Shutdown()
+		},
 	}, nil
 }
 
