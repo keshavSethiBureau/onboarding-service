@@ -4,3 +4,9 @@ environment: ${ENVIRONMENT:local}
 telemetry:
   serviceName: ${OTEL_SERVICE_NAME:onboarding-service}
   otlpEndpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:localhost:4318}
+mongoclient:
+  hosts:
+    - ${MONGO_HOST:localhost:27017}
+  database: ${MONGO_DB:onboarding}
+  username: ${MONGO_USERNAME:}
+  password: ${MONGO_PASSWORD:}

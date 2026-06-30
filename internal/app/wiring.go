@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Bureau-Inc/bureau-commons-go/metricx"
+	"github.com/Bureau-Inc/bureau-commons-go/mongoclient"
 	"github.com/Bureau-Inc/bureau-commons-go/telemetry"
 	telemetryconfig "github.com/Bureau-Inc/bureau-commons-go/telemetry/config"
 	"github.com/gin-gonic/gin"
@@ -22,7 +23,11 @@ import (
 
 	"github.com/bureau/onboarding-service/internal/config"
 	"github.com/bureau/onboarding-service/internal/controller"
+	"github.com/bureau/onboarding-service/internal/repo"
 )
+
+// mongoConnectTimeout bounds the startup connect + index creation.
+const mongoConnectTimeout = 15 * time.Second
 
 // defaultConfigPath is used when CONFIG_FILE is not set.
 const defaultConfigPath = "config.yml"
@@ -37,9 +42,9 @@ const shutdownTimeout = 10 * time.Second
 type Container struct {
 	Router *gin.Engine
 	Cfg    *config.Config
-	// Close tears down peripherals in reverse order of wiring. It is a no-op
-	// for now (no telemetry/DB/redis yet); each teardown is added as the
-	// corresponding peripheral is wired in Wire.
+	// Close tears down peripherals in reverse order of wiring (currently the
+	// Mongo client and telemetry); each teardown is added as the corresponding
+	// peripheral is wired in Wire.
 	Close func() error
 }
 
@@ -68,10 +73,24 @@ func Wire() (*Container, error) {
 	}
 
 	// metricx (Prometheus) — registry for the /metrics exposition + HTTP metrics.
+	// The same registry is handed to mongoclient so its pool/op metrics surface too.
 	registry := metricx.NewRegistry()
 
-	// controllers
-	healthCtrl := controller.NewHealthController()
+	// mongo (datastore) — connect from the mongoclient section of config.yml,
+	// then create the collection indexes described in the LLD. Fails fast if
+	// MongoDB is unreachable at boot (mongoclient pings on connect).
+	mongoCtx, cancel := context.WithTimeout(context.Background(), mongoConnectTimeout)
+	defer cancel()
+	mongoCli, err := mongoclient.GetOrCreateBureauMongoClientFromYAML(mongoCtx, configPath, registry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to mongo: %w", err)
+	}
+	if err := repo.EnsureIndexes(mongoCtx, mongoCli); err != nil {
+		return nil, fmt.Errorf("failed to ensure mongo indexes: %w", err)
+	}
+
+	// controllers — readiness probe pings MongoDB.
+	healthCtrl := controller.NewHealthController(mongoCli.Ping)
 
 	// router: trace + count every request, then register routes.
 	r := gin.Default()
@@ -84,7 +103,14 @@ func Wire() (*Container, error) {
 		Router: r,
 		Cfg:    cfg,
 		Close: func() error {
-			return telemetry.Shutdown()
+			closeCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			mongoErr := mongoCli.Close(closeCtx)
+			telErr := telemetry.Shutdown()
+			if mongoErr != nil {
+				return mongoErr
+			}
+			return telErr
 		},
 	}, nil
 }
