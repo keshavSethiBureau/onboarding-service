@@ -3,21 +3,16 @@ package main
 
 import (
 	"log"
-	"os"
 
 	"github.com/bureau/onboarding-service/internal/app"
 )
 
 func main() {
-	// Port comes from the PORT env var with a sane default. Boot/infra config
-	// will move to commons configloader later (see onboarding-lld.md §9); kept
-	// stdlib-only for now.
-	addr := ":8080"
-	if port := os.Getenv("PORT"); port != "" {
-		addr = ":" + port
+	container, err := app.Wire()
+	if err != nil {
+		log.Fatalf("failed to wire application: %v", err)
 	}
-
-	if err := app.New().Run(addr); err != nil {
-		log.Fatalf("server exited: %v", err)
+	if err := app.Run(container); err != nil {
+		log.Fatalf("server error: %v", err)
 	}
 }
