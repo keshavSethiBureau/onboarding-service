@@ -1,0 +1,46 @@
+# Dev environment config (APP_ENV=dev). Points at shared dev infrastructure.
+# ${VAR:default} placeholders are expanded by the commons loaders at startup.
+server:
+  port: "8080"
+environment: dev
+
+telemetry:
+  serviceName: onboarding-service
+  otlpEndpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://otel-eks.dev.internal}
+
+# Shared dev Apollo (see agent_docs / deployments/apollo README)
+apollo:
+  enabled: true
+  appId: onboarding-service
+  cluster: default
+  namespace: application
+  metaAddr: ${APOLLO_META:http://apollo-config.dev.internal}
+
+# MongoDB — TODO: confirm the onboarding dev cluster; overridable via env.
+mongoclient:
+  hosts:
+    - ${MONGO_HOST:mongo.dev.internal:27017}
+  database: ${MONGO_DB:onboarding}
+  username: ${MONGO_USERNAME:}
+  password: ${MONGO_PASSWORD:}
+
+# Shared Bureau Temporal cluster (same address/namespace as synapse-engine dev)
+temporalclient:
+  address: ${TEMPORAL_ADDRESS:temporal-frontend.temporal.svc.cluster.local:7233}
+  namespace: ${TEMPORAL_NAMESPACE:bureau-workflow-executions}
+  accountSuffix: ""
+  identity: onboarding-service
+  tracingEnabled: true
+  tls:
+    enabled: false
+  worker:
+    maxWorkflowTaskPollers: 4
+    maxActivityTaskPollers: 4
+    maxConcurrentWorkflows: 500
+    maxConcurrentActivities: 500
+    workflowCacheSize: 512
+    disableTelemetryInterceptors: false
+  metrics:
+    enabled: true
+  encryption:
+    enabled: false

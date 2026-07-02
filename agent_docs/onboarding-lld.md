@@ -5,88 +5,128 @@
 
 ## 1. Purpose
 
-Owns everything between account creation and the home screen:
-onboarding journey tracking, vertical selection, questions-per-vertical display,
-and Svix + Lago provisioning. The Authentication Service keeps signup, login,
-Auth0, token management, and email verification.
+Owns everything from email verification onward: organisation creation (by calling
+Auth0), onboarding orchestration, vertical selection, questions-per-vertical
+display, and all post-org-creation resource provisioning (Svix, Lago, and other
+setup migrated from the Authentication Service). The Authentication Service keeps
+signup, login, Auth0 login/token management, and email verification only.
 
-In scope: vertical selection, journey/drop-off tracking, questions-per-vertical
-mapping (display only), Svix + Lago migration.
+Migration note: today the frontend calls the Authentication Service, which calls
+Auth0 to create the organisation and then runs post-creation setup. After this
+change the frontend calls the **Go service**, which calls Auth0 to create the org
+and runs all subsequent setup. Cutover is a single hard release (no dual-run).
+
+In scope: org creation (via Auth0), onboarding orchestration + drop-off tracking,
+vertical selection, questions-per-vertical mapping (display only), migration of
+Svix + Lago + other post-org setup from Auth.
 Out of scope: storing questionnaire answers, capability mapping, template
 recommendations, analytics dashboards, workflow versioning. (All future scope.)
 
 ## 2. Key decisions (do not deviate without updating this file)
 
-1. **State management = plain Go code**, not Temporal. State is a `currentStep`
-   string plus step-history records. (Temporal only ever reconsidered for the
-   provisioning tail, later — not now.)
-2. **Step catalog is versioned.** Each journey is pinned to the catalog version
-   it started under. New steps apply only to journeys started after the change.
+1. **Orchestration = Temporal.** The onboarding flow is a Temporal workflow.
+   Each step (and each external call, e.g. provisioning) is a Temporal activity
+   with its own retry policy. Temporal is the source of truth for *what happened*
+   and for resuming an interrupted flow. Chosen because the flow now has multiple
+   system-side calls and steps that can fail and must retry/resume — real
+   orchestration, not just a status field.
+2. **Journey doc is a denormalised read-model.** Mongo holds ONE
+   `onboarding_journeys` document per user: `currentStep`, `status`,
+   `verticalName`, and an embedded summary of completed steps. This is the fast
+   read for "where is this user" and for resume. There is **no separate
+   `onboarding_steps` collection** and **no `user_verticals` collection.**
+3. **Analytics comes from emitted step-events, NOT from the journey doc or
+   Temporal history.** When a step completes, emit a lightweight step-event to the
+   analytics sink. Rationale: Temporal history is not queryable for funnel
+   analytics and is pruned/archived; the denormalised journey doc is not a good
+   aggregation source. Keep operational state and analytics separate.
+4. **Step catalog is versioned.** Each journey is pinned to the catalog version it
+   started under; new steps apply only to journeys started after the change.
    Exception: a compliance-mandatory step may be force-applied deliberately.
-3. **Journey is the single per-user onboarding record.** The selected vertical is
-   stored **on the journey** (`verticalName`). There is **no separate
-   `user_verticals` collection.**
-4. **Denormalise the summary onto the journey.** `currentStep` + `status` live on
-   the journey doc (hot path = one read by `userId`). Full step history lives in a
-   separate `onboarding_steps` collection (funnel analytics, read rarely).
-5. **Verticals + questions live in Apollo config (`configlib`) + in-memory cache**,
-   not Mongo. Hot-reload updates the cache; no custom refresh endpoint needed.
-   Per-instance cache. They are near-static and read-only at runtime.
+5. **Verticals + questions live in Apollo config (`configlib`) + per-instance
+   in-memory cache**, not Mongo. Hot-reload updates the cache; no custom refresh
+   endpoint. Read-only at runtime.
 6. **Identity comes from the Auth0 token** (userId, orgId), never request bodies.
-7. **Svix + Lago provisioning runs at the very end**, after the journey is marked
-   completed, asynchronously. A provisioning failure must NOT block the homepage.
+7. **Svix + Lago provisioning are Temporal activities at the end of the workflow.**
+   They retry via Temporal's retry policy. A provisioning failure must NOT block
+   the user reaching the homepage; the workflow records the failure and retries
+   independently of the user's progress.
 
 ## 3. Statuses (closed sets)
 
 - Journey status: `in_progress` | `completed`
-- Step status:    `in_progress` | `completed`
+- Step status (within the embedded summary): `in_progress` | `completed`
 
 ## 4. Steps (catalog, versioned)
 
 Current catalog (v1), in order:
 
 ```
-EMAIL_VERIFIED          // recorded by Auth Service (internal API)
-ORGANISATION_CREATED    // recorded by Auth Service (internal API)
+EMAIL_VERIFIED          // signalled by Auth Service (its last responsibility) -> starts workflow
+ORGANISATION_CREATED    // Go service calls Auth0 to create the org, then records this
+<MIGRATED_POST_ORG_STEPS>  // TBD: derived by reading the Auth Service's org-creation flow;
+                           // the real post-creation setup steps that move into Go
 VERTICAL_SELECTED
 QUESTIONNAIRE_VIEWED    // questions shown; answers not stored
 ONBOARDING_COMPLETED
-RESOURCES_PROVISIONED   // Svix + Lago done (very end)
+RESOURCES_PROVISIONED   // Svix + Lago (and other migrated setup) activities done
 ```
 
-Steps are plain strings. Adding a step = new string + bump catalog version;
-existing in-flight journeys keep their pinned version.
+The `<MIGRATED_POST_ORG_STEPS>` placeholder is filled by reading the actual
+org-creation API/flow in the Authentication Service (do not guess these). Each real
+post-org-creation action there becomes a Temporal activity + step here.
 
-Drop-off = read `currentStep` on the journey. The first step a user has not
-completed is where they are; route them there on return.
+Steps are plain strings and map to workflow progress. Adding a step = new string +
+bump catalog version; in-flight journeys keep their pinned version.
 
-## 5. Data models
+Drop-off = read `currentStep` on the journey read-model. On return, route the user
+to the first step they have not completed.
 
-### 5.1 Stored in Mongo (own DB)
+## 5. Temporal design
+
+- **Workflow:** `OnboardingWorkflow`, one per user (WorkflowID = userId), started
+  when the first step signal arrives (EMAIL_VERIFIED) or on session create.
+- **Signals:** the Auth Service (and the frontend) advance the workflow by sending
+  signals — e.g. `EmailVerified`, `OrganisationCreated`, `VerticalSelected`,
+  `QuestionnaireViewed`, `Complete`. Human-paced waits are just the workflow
+  awaiting the next signal.
+- **Activities (each with a retry policy):**
+  - `CreateOrganisation` — calls Auth0 to create the org (idempotent by userId/request key).
+  - `PersistJourneyState` — upsert the denormalised journey read-model in Mongo.
+  - `EmitStepEvent` — emit the analytics step-event.
+  - `<migrated post-org setup activities>` — one per real action read from the Auth
+    Service's org-creation flow (TBD from code).
+  - `ProvisionSvix` — create the Svix application (idempotent; keyed by orgId).
+  - `ProvisionLago` — create the Lago customer (idempotent; keyed by orgId).
+- **Resume:** if the process crashes, Temporal resumes the workflow from its last
+  event; the Mongo read-model is kept current by `PersistJourneyState`.
+- **Idempotency:** provisioning activities use orgId as an idempotency key so
+  retries never double-provision (belt-and-suspenders with the unique orgId index).
+
+## 6. Data models
+
+### 6.1 Mongo (own DB)
 
 ```go
 // collection: onboarding_journeys ; unique index (userId)
 type OnboardingJourney struct {
     ID                 string
-    UserID             string      // primary lookup
+    UserID             string        // primary lookup ; also Temporal WorkflowID
     OrgID              string
     CurrentStep        string
-    Status             string      // in_progress | completed
-    VerticalName       string      // denormalised; set on vertical selection
-    StepCatalogVersion int         // pins which catalog this journey follows
+    Status             string        // in_progress | completed
+    VerticalName       string        // denormalised; set on vertical selection
+    StepCatalogVersion int           // pins which catalog this journey follows
+    Steps              []StepSummary // embedded summary (denormalised)
     StartedAt          time.Time
     CompletedAt        *time.Time
     UpdatedAt          time.Time
 }
 
-// collection: onboarding_steps ; index (journeyId)
-type OnboardingStep struct {
-    ID          string
-    JourneyID   string
+type StepSummary struct {
     StepName    string
-    Status      string      // in_progress | completed
+    Status      string        // in_progress | completed
     CompletedAt *time.Time
-    Metadata    map[string]interface{}
 }
 
 // collection: provisioning_records ; unique index (orgId)
@@ -94,19 +134,23 @@ type ProvisioningRecord struct {
     OrgID             string
     SvixApplicationID string
     LagoCustomerID    string
-    Status            string      // pending | completed | failed
+    Status            string        // pending | completed | failed
     CreatedAt         time.Time
     UpdatedAt         time.Time
 }
 ```
 
-### 5.2 Held in config + cache (not Mongo)
+Note: no `onboarding_steps` collection and no `user_verticals` collection — step
+detail is embedded on the journey (operational) and emitted as events (analytics);
+vertical lives on the journey.
+
+### 6.2 Apollo config + cache (not Mongo)
 
 ```go
 type Vertical struct {
-    Name        string      // e.g. "KYC" — this is what is stored on the journey
+    Name        string      // e.g. "KYC" — stored on the journey
     Description string
-    Tags        []string    // future use; not used in any V1 logic
+    Tags        []string    // future use; not used in V1 logic
 }
 
 type VerticalQuestions struct {
@@ -115,100 +159,122 @@ type VerticalQuestions struct {
 }
 
 type Question struct {
-    Key     string      // stable id
+    Key     string
     Label   string
     Type    string      // single_choice | multi_choice | text | number | boolean
     Options []string
 }
 ```
 
-Loaded on startup into an in-memory map keyed by vertical name; replaced
-atomically on refresh.
-
-## 6. APIs
+## 7. APIs
 
 ### Public (`/v1`, Auth0 token required; identity from token)
-
 ```
-GET  /v1/verticals                      list active verticals (from cache)
-GET  /v1/onboarding/state               { current_step, status } for resume
-POST /v1/onboarding/vertical            body { vertical_name }; sets verticalName on journey
-GET  /v1/onboarding/questionnaire       questions for the journey's vertical (from cache)
-POST /v1/onboarding/complete            mark completed; triggers provisioning (async)
+POST /v1/onboarding/organisation  frontend calls this to create the org (Go calls Auth0);
+                                   starts the workflow and records ORGANISATION_CREATED
+GET  /v1/verticals                 list active verticals (from cache)
+GET  /v1/onboarding/state          { current_step, status } from journey read-model
+POST /v1/onboarding/vertical       body { vertical_name }; signals VerticalSelected
+GET  /v1/onboarding/questionnaire  questions for the journey's vertical (from cache)
+POST /v1/onboarding/complete       signals Complete to the workflow
 ```
 
 ### Internal (`/v1/internal`, Auth Service only, internal network)
-
 ```
-POST /v1/internal/onboarding/steps      body { user_id, org_id, step_name }
-                                         UPSERTS journey (create if absent), records step
+POST /v1/internal/onboarding/steps  body { user_id, org_id, step_name }
+                                     Auth's ONLY call: signals EMAIL_VERIFIED, starting
+                                     the workflow. Everything after is owned by Go.
 ```
 
-Verticals/questions refresh is handled by Apollo hot-reload, not an endpoint.
+The frontend's org-creation call moves from the Auth Service to
+`POST /v1/onboarding/organisation` on the Go service. Public write endpoints
+translate to Temporal signals/activities. Verticals/questions refresh via Apollo
+hot-reload, not an endpoint.
 
-## 7. Critical flows
+## 8. Critical flows
 
 ### Returning user (resume)
 ```
 Auth0 login -> token { sub=userId, org_id }
   -> GET /v1/onboarding/state
-  -> lookup journey by userId -> return currentStep
+  -> read journey read-model by userId -> return currentStep
   -> frontend routes to that step
 ```
-Journey always exists by return time because the internal step API upserts it at
-EMAIL_VERIFIED. If none found, return the first step.
+The read-model always exists by return time because the first internal step starts
+the workflow, whose PersistJourneyState activity writes the journey. If missing,
+return the first step.
 
-### Provisioning (end of journey)
+### Provisioning (end of workflow)
 ```
-POST /v1/onboarding/complete
-  -> journey.status = completed ; record ONBOARDING_COMPLETED
-  -> async: create Svix app, create Lago customer
-        success -> ProvisioningRecord.status=completed ; record RESOURCES_PROVISIONED
-        failure -> ProvisioningRecord.status=failed ; schedule retry (does NOT fail complete)
-  -> user proceeds to homepage regardless
+Complete signal
+  -> workflow marks journey completed (PersistJourneyState); user proceeds to homepage
+  -> ProvisionSvix activity (retry policy, idempotent by orgId)
+  -> ProvisionLago activity (retry policy, idempotent by orgId)
+  -> success: ProvisioningRecord.status=completed ; RESOURCES_PROVISIONED
+  -> failure: Temporal retries independently; user is NOT blocked
 ```
-Provisioning must be idempotent (do not double-provision an org). A feature flag on
-the Auth Service disables its old Svix/Lago provisioning once this service is live.
+A feature flag on the Auth Service disables its old Svix/Lago provisioning once this
+service is live.
 
-## 8. Concurrency / integrity invariants (review these carefully)
+## 9. Migration from the Authentication Service
 
-- **One journey per user** — enforced by unique index on `userId`; the internal
-  upsert must be create-if-absent without creating duplicates under concurrent calls.
-- **Provisioning idempotency** — unique index on `orgId`; retries must not create a
-  second Svix app / Lago customer.
+Hard cutover in a single release (no dual-run, no proxy):
 
-## 9. Peripherals & infrastructure (bureau-commons-go)
+- Before: frontend -> Auth Service -> Auth0 (create org) -> Auth runs post-org setup.
+- After:  frontend -> Go service `POST /v1/onboarding/organisation` -> Auth0 (create org)
+          -> Go workflow runs all post-org setup (migrated) -> Svix/Lago -> complete.
 
-Wire foundation peripherals before the service layer. Use commons packages; do
-not hand-roll equivalents.
+Steps to migrate correctly:
+1. **Read the Auth Service's org-creation API/flow** and enumerate every action it
+   performs after the Auth0 org-creation call (this defines `<MIGRATED_POST_ORG_STEPS>`
+   and the corresponding Temporal activities). Do not guess these — derive from code.
+2. Reimplement each as a Temporal activity in the Go service (idempotent).
+3. Move the frontend's org-creation call to the Go endpoint.
+4. Disable the org-creation + post-org setup path in the Auth Service in the same release.
+
+Hard-cutover risk to note: any user mid-flow at release time. Since org creation is a
+single call and the workflow is keyed by userId, a retry after cutover simply starts
+the Go workflow; ensure the Auth0 org-creation activity is idempotent so a user who
+half-completed under Auth is not double-created.
+
+## 10. Concurrency / integrity invariants (review carefully)
+
+- **One workflow + one journey per user** — WorkflowID = userId; unique index on
+  userId. Starting a workflow that already exists must be a no-op/signal, not a
+  duplicate.
+- **Org creation idempotency** — the Auth0 CreateOrganisation activity must be
+  idempotent (keyed by userId/request key) so retries or a post-cutover replay never
+  create two orgs.
+- **Provisioning idempotency** — orgId idempotency key on Svix/Lago (and migrated
+  setup) activities + unique orgId index; retries never double-provision.
+
+## 11. Peripherals & infrastructure (bureau-commons-go)
 
 ### Wire at startup (foundation)
-- `configloader` — boot/infra config: Mongo URI, Auth0 settings, ports, timeouts
-  (`${VAR:default}` env expansion).
-- `configlib` (Apollo) — verticals + questions; hot-reload into per-instance
-  in-memory cache. This replaces any custom refresh endpoint.
-- `mongoclient` — datastore singleton; create the 3 collections' indexes at startup
-  (unique userId; journeyId; unique orgId).
-- `telemetry` — OpenTelemetry global setup at boot (so every handler + Mongo call
-  is traced from day one).
-- `metricx` — Prometheus façade + `/metrics`; add onboarding funnel counters
-  (drop-off per step) as steps are built.
-- Health check — liveness (process up) + readiness (Mongo connected AND vertical
-  cache warm/non-empty).
+- `configloader` — boot/infra config: Mongo URI, Auth0, Temporal address, ports.
+- `configlib` (Apollo) — verticals + questions; hot-reload into per-instance cache.
+- `mongoclient` — datastore singleton; create indexes at startup
+  (unique userId on onboarding_journeys; unique orgId on provisioning_records).
+- `temporalclient` — Temporal workflow client + worker registration.
+- `telemetry` — OpenTelemetry global setup at boot.
+- `metricx` — Prometheus façade + `/metrics`.
+- Health check — liveness (process up) + readiness (Mongo connected, Temporal
+  reachable, vertical cache warm).
 
-### Wire at the provisioning step (Step 6, not before)
-- `httpclient` — Svix + Lago external calls (config-driven TLS, retry, pool, OTel).
-- `lock` — Redis-backed distributed lock guarding provisioning idempotency
-  (belt-and-suspenders over the unique orgId index).
-- `redisclient` — comes with `lock`; optional shared cache later.
+### Wire with the provisioning activities
+- `httpclient` — Svix + Lago external calls (TLS, retry, pool, OTel). Temporal also
+  retries at the activity level; use httpclient retry for transient transport
+  errors and Temporal's for activity-level failures.
 - `docstore` — only if provisioning stores blob assets.
 
-### Do NOT wire (V1)
-- `temporalclient` — onboarding state is plain Go (see decision 1).
-- `kafkaclient` / `eventclient` — V1 uses the synchronous internal Auth→Onboarding
-  call; adopt events only when onboarding must emit domain events to other services.
+### Optional / later
+- `redisclient`, `lock` — likely NOT needed: Temporal + idempotency keys + the
+  unique orgId index already cover provisioning safety. Add only on a concrete need.
+- `kafkaclient` / `eventclient` — for the analytics step-events sink if events go
+  over Kafka, and for emitting onboarding domain events to other services. Wire when
+  the analytics sink / consumers are defined.
 
-## 10. Layering (mirrors dendrite-store; do not share structs across layers)
+## 12. Layering (mirrors dendrite-store; do not share structs across layers)
 
 ```
 write: view.Request -> dto.X -> adapters.ToRepoX -> repo.XDoc -> Mongo
@@ -216,12 +282,14 @@ read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Response
 ```
 - DAO: `internal/repo` · DTO: `internal/service/dto` · View: `pkg/view`
 - Adapters: `internal/service/dto/adapters` · Logic: `internal/service/impl`
+- Temporal workflow + activities: `internal/workflow`
 - Controllers: `internal/controller` · Config/cache: `internal/config`
 - Wiring: `internal/app` · Entrypoint: `cmd/server`
 
-## 11. Future scope (not now, but schema-compatible)
+## 13. Future scope (not now, but schema-compatible)
 
 - Store questionnaire answers (new collection keyed by userId).
 - Capability mapping from answers.
-- Template recommendations by vertical (templates live in dendrite-store, one
-  vertical per template).
+- Template recommendations by vertical (templates in dendrite-store, one vertical
+  per template).
+- Onboarding domain events to other services (via eventclient/Kafka).

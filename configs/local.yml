@@ -1,0 +1,49 @@
+# Local development config (APP_ENV=local, the default).
+# Concrete localhost values; run the dependencies locally (mongod, temporal
+# server start-dev, and optionally the Apollo stack in deployments/apollo).
+server:
+  port: "8080"
+environment: local
+
+# OpenTelemetry (bureau-commons-go/telemetry)
+telemetry:
+  serviceName: onboarding-service
+  otlpEndpoint: localhost:4318
+
+# Apollo config client (bureau-commons-go/configlib). Empty metaAddr => the
+# vertical cache resolves from seeded defaults (no Apollo server needed).
+apollo:
+  enabled: true
+  appId: onboarding-service
+  cluster: default
+  namespace: application
+  metaAddr: ""
+
+# MongoDB (bureau-commons-go/mongoclient)
+mongoclient:
+  hosts:
+    - localhost:27017
+  database: onboarding
+  username: ""
+  password: ""
+
+# Temporal (bureau-commons-go/temporalclient) — same block shape as synapse-engine
+temporalclient:
+  address: localhost:7233
+  namespace: default
+  accountSuffix: ""
+  identity: onboarding-service
+  tracingEnabled: true
+  tls:
+    enabled: false
+  worker:
+    maxWorkflowTaskPollers: 4
+    maxActivityTaskPollers: 4
+    maxConcurrentWorkflows: 500
+    maxConcurrentActivities: 500
+    workflowCacheSize: 512
+    disableTelemetryInterceptors: false
+  metrics:
+    enabled: true
+  encryption:
+    enabled: false

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -20,19 +21,36 @@ import (
 	"github.com/Bureau-Inc/bureau-commons-go/mongoclient"
 	"github.com/Bureau-Inc/bureau-commons-go/telemetry"
 	telemetryconfig "github.com/Bureau-Inc/bureau-commons-go/telemetry/config"
+	temporalclient "github.com/Bureau-Inc/bureau-commons-go/temporalclient/client"
+	temporalconfig "github.com/Bureau-Inc/bureau-commons-go/temporalclient/config"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	sdkclient "go.temporal.io/sdk/client"
 
 	"github.com/bureau/onboarding-service/internal/config"
 	"github.com/bureau/onboarding-service/internal/controller"
 	"github.com/bureau/onboarding-service/internal/repo"
+	"github.com/bureau/onboarding-service/internal/workflow"
 )
 
 // mongoConnectTimeout bounds the startup connect + index creation.
 const mongoConnectTimeout = 15 * time.Second
 
-// defaultConfigPath is used when CONFIG_FILE is not set.
-const defaultConfigPath = "config.yml"
+// defaultEnv selects configs/local.yml when APP_ENV is unset.
+const defaultEnv = "local"
+
+// resolveConfigPath returns the config file to load. CONFIG_FILE wins if set;
+// otherwise it is configs/<APP_ENV>.yml (APP_ENV defaults to "local").
+func resolveConfigPath() string {
+	if cf := os.Getenv("CONFIG_FILE"); cf != "" {
+		return cf
+	}
+	env := os.Getenv("APP_ENV")
+	if env == "" {
+		env = defaultEnv
+	}
+	return filepath.Join("configs", env+".yml")
+}
 
 // shutdownTimeout bounds how long Run waits for in-flight requests to drain
 // before forcing the server closed.
@@ -55,11 +73,8 @@ type Container struct {
 // Wiring order (extended as peripherals are added): config -> telemetry ->
 // mongo -> redis -> repos -> services -> controllers -> router.
 func Wire() (*Container, error) {
-	// config (boot/infra) — path from CONFIG_FILE, default config.yml
-	configPath := os.Getenv("CONFIG_FILE")
-	if configPath == "" {
-		configPath = defaultConfigPath
-	}
+	// config (boot/infra) — configs/<APP_ENV>.yml (default local), or CONFIG_FILE.
+	configPath := resolveConfigPath()
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
@@ -111,7 +126,24 @@ func Wire() (*Container, error) {
 		return nil, fmt.Errorf("failed to load vertical cache: %w", err)
 	}
 
-	// controllers — readiness requires Mongo reachable AND a non-empty cache.
+	// temporal (orchestration) — client + a worker polling the onboarding task
+	// queue, registering the OnboardingWorkflow and its activities. mongoCtx
+	// (cancelled when Wire returns) bounds only the initial dial; the worker
+	// runs independently afterwards.
+	tcfg, err := temporalconfig.FromYAML(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load temporal config: %w", err)
+	}
+	tfactory, err := temporalclient.NewFactory(tcfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init temporal factory: %w", err)
+	}
+	temporalClients, temporalWorker, err := tfactory.StartWorker(mongoCtx, workflow.TaskQueue, workflow.Register)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start temporal worker: %w", err)
+	}
+
+	// controllers — readiness requires Mongo, a non-empty cache, AND Temporal.
 	healthCtrl := controller.NewHealthController(
 		controller.ReadinessCheck{Name: "mongo", Probe: mongoCli.Ping},
 		controller.ReadinessCheck{Name: "verticals", Probe: func(context.Context) error {
@@ -119,6 +151,10 @@ func Wire() (*Container, error) {
 				return errors.New("vertical cache empty")
 			}
 			return nil
+		}},
+		controller.ReadinessCheck{Name: "temporal", Probe: func(ctx context.Context) error {
+			_, err := temporalClients.Client.CheckHealth(ctx, &sdkclient.CheckHealthRequest{})
+			return err
 		}},
 	)
 	verticalsCtrl := controller.NewVerticalsController(verticalCache)
@@ -137,6 +173,8 @@ func Wire() (*Container, error) {
 		Close: func() error {
 			closeCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()
+			temporalWorker.Stop()
+			temporalClients.Close()
 			apolloClient.Close()
 			mongoErr := mongoCli.Close(closeCtx)
 			telErr := telemetry.Shutdown()
