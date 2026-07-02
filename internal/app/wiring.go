@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Bureau-Inc/bureau-commons-go/configlib"
+	configlibconfig "github.com/Bureau-Inc/bureau-commons-go/configlib/config"
 	"github.com/Bureau-Inc/bureau-commons-go/metricx"
 	"github.com/Bureau-Inc/bureau-commons-go/mongoclient"
 	"github.com/Bureau-Inc/bureau-commons-go/telemetry"
@@ -89,14 +91,44 @@ func Wire() (*Container, error) {
 		return nil, fmt.Errorf("failed to ensure mongo indexes: %w", err)
 	}
 
-	// controllers — readiness probe pings MongoDB.
-	healthCtrl := controller.NewHealthController(mongoCli.Ping)
+	// configlib (Apollo) — load verticals + questions into a per-instance cache
+	// that hot-reloads. With an empty MetaAddr this resolves from the seeded
+	// defaults (no Apollo server); set APOLLO_META to enable live hot-reload.
+	apolloClient, err := configlib.New(&configlibconfig.Options{
+		Enabled:    cfg.Apollo.Enabled,
+		AppID:      cfg.Apollo.AppID,
+		Cluster:    cfg.Apollo.Cluster,
+		Namespaces: []string{cfg.Apollo.Namespace},
+		MetaAddr:   cfg.Apollo.MetaAddr,
+		MustStart:  false,
+		Defaults:   config.SeedDefaults(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to init configlib: %w", err)
+	}
+	verticalCache, err := config.LoadVerticalCache(apolloClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load vertical cache: %w", err)
+	}
+
+	// controllers — readiness requires Mongo reachable AND a non-empty cache.
+	healthCtrl := controller.NewHealthController(
+		controller.ReadinessCheck{Name: "mongo", Probe: mongoCli.Ping},
+		controller.ReadinessCheck{Name: "verticals", Probe: func(context.Context) error {
+			if verticalCache.Len() == 0 {
+				return errors.New("vertical cache empty")
+			}
+			return nil
+		}},
+	)
+	verticalsCtrl := controller.NewVerticalsController(verticalCache)
 
 	// router: trace + count every request, then register routes.
 	r := gin.Default()
 	r.Use(otelgin.Middleware(cfg.Telemetry.ServiceName))
 	r.Use(controller.MetricsMiddleware(registry))
 	healthCtrl.RegisterRoutes(r)
+	verticalsCtrl.RegisterRoutes(r)
 	r.GET("/metrics", gin.WrapH(metricx.NewHandler(registry, &metricx.Options{})))
 
 	return &Container{
@@ -105,6 +137,7 @@ func Wire() (*Container, error) {
 		Close: func() error {
 			closeCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()
+			apolloClient.Close()
 			mongoErr := mongoCli.Close(closeCtx)
 			telErr := telemetry.Shutdown()
 			if mongoErr != nil {

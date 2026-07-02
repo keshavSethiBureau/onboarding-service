@@ -9,24 +9,29 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// readinessTimeout bounds the dependency check behind GET /ready.
+// readinessTimeout bounds each dependency check behind GET /ready.
 const readinessTimeout = 2 * time.Second
+
+// ReadinessCheck is a named dependency probe for the readiness endpoint.
+type ReadinessCheck struct {
+	Name  string
+	Probe func(context.Context) error
+}
 
 // HealthController serves the liveness and readiness probes.
 //
 //   - /health is liveness: 200 as long as the process is up.
-//   - /ready  is readiness: 200 only when dependencies (currently MongoDB) are
-//     reachable, 503 otherwise — see agent_docs/onboarding-lld.md §9.
+//   - /ready  is readiness: 200 only when every dependency check passes, 503
+//     otherwise — currently MongoDB connectivity and a non-empty vertical
+//     cache (see agent_docs/onboarding-lld.md §9).
 type HealthController struct {
-	// checkReady reports whether downstream dependencies are reachable. A nil
-	// check means the service is always considered ready.
-	checkReady func(context.Context) error
+	checks []ReadinessCheck
 }
 
-// NewHealthController returns a HealthController whose readiness probe uses
-// checkReady (e.g. a MongoDB ping). Pass nil for an always-ready service.
-func NewHealthController(checkReady func(context.Context) error) *HealthController {
-	return &HealthController{checkReady: checkReady}
+// NewHealthController returns a HealthController whose readiness probe runs the
+// given checks. With no checks the service is always considered ready.
+func NewHealthController(checks ...ReadinessCheck) *HealthController {
+	return &HealthController{checks: checks}
 }
 
 // RegisterRoutes wires the health endpoints onto the router.
@@ -40,19 +45,27 @@ func (c *HealthController) Health(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-// Ready responds 200 when dependencies are reachable, 503 otherwise.
+// Ready responds 200 when all dependency checks pass, 503 otherwise, reporting
+// each dependency's status.
 func (c *HealthController) Ready(ctx *gin.Context) {
-	if c.checkReady == nil {
-		ctx.JSON(http.StatusOK, gin.H{"status": "ready"})
-		return
+	results := make(map[string]string, len(c.checks))
+	ready := true
+
+	for _, check := range c.checks {
+		cctx, cancel := context.WithTimeout(ctx.Request.Context(), readinessTimeout)
+		err := check.Probe(cctx)
+		cancel()
+		if err != nil {
+			results[check.Name] = "down"
+			ready = false
+			continue
+		}
+		results[check.Name] = "ok"
 	}
 
-	cctx, cancel := context.WithTimeout(ctx.Request.Context(), readinessTimeout)
-	defer cancel()
-
-	if err := c.checkReady(cctx); err != nil {
-		ctx.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "mongo": "down"})
+	if !ready {
+		ctx.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "checks": results})
 		return
 	}
-	ctx.JSON(http.StatusOK, gin.H{"status": "ready", "mongo": "ok"})
+	ctx.JSON(http.StatusOK, gin.H{"status": "ready", "checks": results})
 }

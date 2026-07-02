@@ -10,3 +10,13 @@ mongoclient:
   database: ${MONGO_DB:onboarding}
   username: ${MONGO_USERNAME:}
   password: ${MONGO_PASSWORD:}
+apollo:
+  enabled: ${APOLLO_ENABLED:true}
+  appId: ${APOLLO_APP_ID:onboarding-service}
+  cluster: ${APOLLO_CLUSTER:default}
+  namespace: ${APOLLO_NAMESPACE:application}
+  # Empty locally -> configlib runs in defaults-only mode (no Apollo server,
+  # uses the seeded defaults). Set APOLLO_META to enable live hot-reload:
+  #   local stack: http://localhost:8080   (see deployments/apollo)
+  #   shared dev:  http://apollo-config.dev.internal
+  metaAddr: ${APOLLO_META:}

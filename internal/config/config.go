@@ -14,12 +14,23 @@ type Config struct {
 	} `yaml:"server"`
 	Environment string          `yaml:"environment"`
 	Telemetry   TelemetryConfig `yaml:"telemetry"`
+	Apollo      ApolloConfig    `yaml:"apollo"`
 }
 
 // TelemetryConfig holds OpenTelemetry settings consumed by commons telemetry.
 type TelemetryConfig struct {
 	ServiceName  string `yaml:"serviceName"`
 	OTLPEndpoint string `yaml:"otlpEndpoint"`
+}
+
+// ApolloConfig holds the configlib (Apollo) client settings. An empty MetaAddr
+// runs configlib in defaults-only mode (no Apollo server, no hot-reload).
+type ApolloConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	AppID     string `yaml:"appId"`
+	Cluster   string `yaml:"cluster"`
+	Namespace string `yaml:"namespace"`
+	MetaAddr  string `yaml:"metaAddr"`
 }
 
 // Load reads the YAML config at path, applying configloader's ${VAR:default}
