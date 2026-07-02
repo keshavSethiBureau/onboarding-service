@@ -35,16 +35,24 @@ func TestOnboardingWorkflow_AdvancesAndPersistsPerTransition(t *testing.T) {
 	capture := &captureRepo{}
 	env.RegisterActivity(NewActivities(capture).PersistJourneyState)
 
-	// Deliver EMAIL_VERIFIED (start), then a mid step, then the terminal step.
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(StepSignalName, StepSignal{StepName: StepEmailVerified, OrgID: "org-1"})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(StepSignalName, StepSignal{StepName: StepVerticalSelected})
-	}, 2*time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(StepSignalName, StepSignal{StepName: StepOnboardingCompleted})
-	}, 3*time.Millisecond)
+	// Deliver steps, including a DUPLICATE EMAIL_VERIFIED (must be a no-op) and
+	// running through the terminal step RESOURCES_PROVISIONED.
+	signals := []struct {
+		at   time.Duration
+		step string
+	}{
+		{1 * time.Millisecond, StepEmailVerified},
+		{2 * time.Millisecond, StepVerticalSelected},
+		{3 * time.Millisecond, StepEmailVerified}, // duplicate -> ignored
+		{4 * time.Millisecond, StepOnboardingCompleted},
+		{5 * time.Millisecond, StepResourcesProvisioned},
+	}
+	for _, s := range signals {
+		s := s
+		env.RegisterDelayedCallback(func() {
+			env.SignalWorkflow(StepSignalName, StepSignal{StepName: s.step, OrgID: "org-1"})
+		}, s.at)
+	}
 
 	env.ExecuteWorkflow(OnboardingWorkflow, WorkflowInput{UserID: "user-1", OrgID: "org-1"})
 
@@ -55,37 +63,37 @@ func TestOnboardingWorkflow_AdvancesAndPersistsPerTransition(t *testing.T) {
 		t.Fatalf("workflow error: %v", err)
 	}
 
-	// One persist per transition (3 signals).
-	if len(capture.docs) != 3 {
-		t.Fatalf("expected 3 persisted transitions, got %d", len(capture.docs))
+	// 5 signals but only 4 real transitions -> the duplicate EMAIL_VERIFIED
+	// persisted nothing (effect-idempotent).
+	if len(capture.docs) != 4 {
+		t.Fatalf("expected 4 persisted transitions (duplicate ignored), got %d", len(capture.docs))
 	}
 
-	// catalog version pinned on every persist; orgId propagated from the signal.
 	for i, d := range capture.docs {
 		if d.StepCatalogVersion != CatalogVersion {
-			t.Errorf("doc[%d] catalog version = %d, want %d", i, d.StepCatalogVersion, CatalogVersion)
+			t.Errorf("doc[%d] catalog version = %d, want %d (pinned)", i, d.StepCatalogVersion, CatalogVersion)
 		}
 		if d.UserID != "user-1" || d.OrgID != "org-1" {
 			t.Errorf("doc[%d] identity = %s/%s", i, d.UserID, d.OrgID)
 		}
 	}
 
-	// currentStep advances with each transition.
-	wantSteps := []string{StepEmailVerified, StepVerticalSelected, StepOnboardingCompleted}
-	for i, want := range wantSteps {
+	// currentStep tracks furthest progress and never regresses on the duplicate.
+	wantProgress := []string{StepEmailVerified, StepVerticalSelected, StepOnboardingCompleted, StepResourcesProvisioned}
+	for i, want := range wantProgress {
 		if capture.docs[i].CurrentStep != want {
 			t.Errorf("transition %d currentStep = %q, want %q", i, capture.docs[i].CurrentStep, want)
 		}
 	}
 
-	final := capture.docs[len(capture.docs)-1]
-	if final.Status != dto.StatusCompleted {
-		t.Errorf("final status = %q, want completed", final.Status)
+	// Journey is marked completed at ONBOARDING_COMPLETED (3rd transition)...
+	if capture.docs[2].Status != dto.StatusCompleted || capture.docs[2].CompletedAt == nil {
+		t.Errorf("expected completed status at ONBOARDING_COMPLETED, got %+v", capture.docs[2])
 	}
-	if len(final.Steps) != 3 {
-		t.Errorf("final embedded step summary = %d entries, want 3", len(final.Steps))
-	}
-	if final.CompletedAt == nil {
-		t.Error("final journey missing completedAt")
+
+	// ...and the final state has all 4 distinct steps in the embedded summary.
+	final := capture.docs[3]
+	if len(final.Steps) != 4 {
+		t.Errorf("final embedded step summary = %d entries, want 4 (deduped)", len(final.Steps))
 	}
 }

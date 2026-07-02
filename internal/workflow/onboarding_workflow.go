@@ -57,13 +57,20 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		StartedAt:          workflow.Now(ctx),
 	}
 
+	// The workflow stays alive until the terminal catalog step (so a late step,
+	// e.g. provisioning after ONBOARDING_COMPLETED, reaches THIS run and never
+	// spawns a second workflow). journey.Status flips to completed earlier, on
+	// ONBOARDING_COMPLETED, so the user reaches the homepage without waiting.
 	ch := workflow.GetSignalChannel(ctx, StepSignalName)
-	for journey.Status != dto.StatusCompleted {
+	for !isCompleted(&journey, TerminalStep) {
 		var sig StepSignal
 		ch.Receive(ctx, &sig)
 
-		applyStep(&journey, sig, workflow.Now(ctx))
-
+		// Ignore duplicate / out-of-order / unknown steps: only persist on a
+		// real state change, so Auth Service retries are effect-idempotent.
+		if !applyStep(&journey, sig, workflow.Now(ctx)) {
+			continue
+		}
 		if err := workflow.ExecuteActivity(ctx, persistActivityName, journey).Get(ctx, nil); err != nil {
 			return err
 		}
@@ -75,35 +82,71 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 // a nil receiver is fine because it is only used for name resolution, never called.
 var persistActivityName = (*Activities)(nil).PersistJourneyState
 
-// applyStep records a signalled step as completed, updates currentStep, and
-// marks the journey completed when the terminal step is reached.
-func applyStep(j *dto.OnboardingJourney, sig StepSignal, now time.Time) {
+// catalogIndex maps a step name to its catalog position for progress ordering.
+// Built once at init; only point lookups are done in the workflow (deterministic).
+var catalogIndex = func() map[string]int {
+	m := make(map[string]int, len(Catalog))
+	for i, s := range Catalog {
+		m[s] = i
+	}
+	return m
+}()
+
+// applyStep records a signalled step as completed and recomputes currentStep as
+// the furthest-progressed step. It returns false (no change) when the step is
+// unknown or already completed, so callers can skip persisting. currentStep
+// never regresses on a duplicate/out-of-order signal.
+func applyStep(j *dto.OnboardingJourney, sig StepSignal, now time.Time) bool {
+	if _, known := catalogIndex[sig.StepName]; !known {
+		return false // not a catalog step — ignore
+	}
+	if isCompleted(j, sig.StepName) {
+		if sig.OrgID != "" && j.OrgID == "" {
+			j.OrgID = sig.OrgID
+		}
+		return false // already done — idempotent no-op
+	}
 	if sig.OrgID != "" {
 		j.OrgID = sig.OrgID
 	}
 
 	completedAt := now
-	updated := false
-	for i := range j.Steps {
-		if j.Steps[i].StepName == sig.StepName {
-			j.Steps[i].Status = dto.StatusCompleted
-			j.Steps[i].CompletedAt = &completedAt
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		j.Steps = append(j.Steps, dto.StepSummary{
-			StepName:    sig.StepName,
-			Status:      dto.StatusCompleted,
-			CompletedAt: &completedAt,
-		})
-	}
+	j.Steps = append(j.Steps, dto.StepSummary{
+		StepName:    sig.StepName,
+		Status:      dto.StatusCompleted,
+		CompletedAt: &completedAt,
+	})
 
-	j.CurrentStep = sig.StepName
+	j.CurrentStep = furthestCompletedStep(j)
 	j.UpdatedAt = now
-	if sig.StepName == StepOnboardingCompleted {
+	if isCompleted(j, StepOnboardingCompleted) && j.CompletedAt == nil {
 		j.Status = dto.StatusCompleted
 		j.CompletedAt = &completedAt
 	}
+	return true
+}
+
+// isCompleted reports whether a step is present and completed in the summary.
+func isCompleted(j *dto.OnboardingJourney, stepName string) bool {
+	for i := range j.Steps {
+		if j.Steps[i].StepName == stepName {
+			return j.Steps[i].Status == dto.StatusCompleted
+		}
+	}
+	return false
+}
+
+// furthestCompletedStep returns the completed step with the highest catalog
+// index — the user's true progress, immune to out-of-order signals.
+func furthestCompletedStep(j *dto.OnboardingJourney) string {
+	best, bestIdx := "", -1
+	for i := range j.Steps {
+		if j.Steps[i].Status != dto.StatusCompleted {
+			continue
+		}
+		if idx := catalogIndex[j.Steps[i].StepName]; idx > bestIdx {
+			best, bestIdx = j.Steps[i].StepName, idx
+		}
+	}
+	return best
 }

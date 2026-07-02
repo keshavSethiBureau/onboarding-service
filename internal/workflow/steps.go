@@ -26,3 +26,9 @@ var Catalog = []string{
 
 // FirstStep is where a brand-new (or not-yet-created) journey starts.
 func FirstStep() string { return Catalog[0] }
+
+// TerminalStep is the last catalog step; reaching it ends the workflow. Note
+// this is RESOURCES_PROVISIONED, which comes AFTER ONBOARDING_COMPLETED — the
+// journey is marked completed at ONBOARDING_COMPLETED but the workflow stays
+// alive to run provisioning, so late steps never spawn a second workflow.
+var TerminalStep = Catalog[len(Catalog)-1]
