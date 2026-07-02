@@ -10,6 +10,14 @@ telemetry:
   serviceName: onboarding-service
   otlpEndpoint: localhost:4318
 
+# Auth0 JWT (internal/auth). Disabled locally => identity from X-User-Id/X-Org-Id
+# headers so you can curl without a real Auth0 tenant.
+auth:
+  enabled: false
+  issuer: ""
+  audience: ""
+  jwksUrl: ""
+
 # Apollo config client (bureau-commons-go/configlib). Empty metaAddr => the
 # vertical cache resolves from seeded defaults (no Apollo server needed).
 apollo:

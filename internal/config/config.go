@@ -15,6 +15,16 @@ type Config struct {
 	Environment string          `yaml:"environment"`
 	Telemetry   TelemetryConfig `yaml:"telemetry"`
 	Apollo      ApolloConfig    `yaml:"apollo"`
+	Auth        AuthConfig      `yaml:"auth"`
+}
+
+// AuthConfig holds Auth0 JWT validation settings. When Enabled is false the
+// middleware runs in dev mode (identity from X-User-Id/X-Org-Id headers).
+type AuthConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Issuer   string `yaml:"issuer"`
+	Audience string `yaml:"audience"`
+	JWKSURL  string `yaml:"jwksUrl"`
 }
 
 // TelemetryConfig holds OpenTelemetry settings consumed by commons telemetry.

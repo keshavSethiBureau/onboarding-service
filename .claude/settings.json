@@ -2,6 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "permissions": {
     "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(head *)",
+      "Bash(tail *)",
       "Bash(go *)",
       "Bash(gofmt *)",
       "Bash(golangci-lint *)",

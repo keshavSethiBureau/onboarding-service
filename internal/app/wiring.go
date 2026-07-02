@@ -26,10 +26,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	sdkclient "go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
 
+	"github.com/bureau/onboarding-service/internal/auth"
 	"github.com/bureau/onboarding-service/internal/config"
 	"github.com/bureau/onboarding-service/internal/controller"
 	"github.com/bureau/onboarding-service/internal/repo"
+	mongorepo "github.com/bureau/onboarding-service/internal/repo/mongo"
+	"github.com/bureau/onboarding-service/internal/service/impl"
 	"github.com/bureau/onboarding-service/internal/workflow"
 )
 
@@ -106,6 +110,9 @@ func Wire() (*Container, error) {
 		return nil, fmt.Errorf("failed to ensure mongo indexes: %w", err)
 	}
 
+	// repositories (DAO layer)
+	journeyRepo := mongorepo.NewOnboardingJourneyRepo(mongoCli)
+
 	// configlib (Apollo) — load verticals + questions into a per-instance cache
 	// that hot-reloads. With an empty MetaAddr this resolves from the seeded
 	// defaults (no Apollo server); set APOLLO_META to enable live hot-reload.
@@ -138,7 +145,10 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init temporal factory: %w", err)
 	}
-	temporalClients, temporalWorker, err := tfactory.StartWorker(mongoCtx, workflow.TaskQueue, workflow.Register)
+	activities := workflow.NewActivities(journeyRepo)
+	temporalClients, temporalWorker, err := tfactory.StartWorker(mongoCtx, workflow.TaskQueue, func(r worker.Registry) {
+		workflow.Register(r, activities)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start temporal worker: %w", err)
 	}
@@ -159,12 +169,25 @@ func Wire() (*Container, error) {
 	)
 	verticalsCtrl := controller.NewVerticalsController(verticalCache)
 
+	// auth (Auth0 JWT) — identity from the token; dev mode via headers when disabled.
+	authMW, err := auth.New(auth.Config{
+		Enabled:  cfg.Auth.Enabled,
+		Issuer:   cfg.Auth.Issuer,
+		Audience: cfg.Auth.Audience,
+		JWKSURL:  cfg.Auth.JWKSURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to init auth: %w", err)
+	}
+	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo))
+
 	// router: trace + count every request, then register routes.
 	r := gin.Default()
 	r.Use(otelgin.Middleware(cfg.Telemetry.ServiceName))
 	r.Use(controller.MetricsMiddleware(registry))
 	healthCtrl.RegisterRoutes(r)
 	verticalsCtrl.RegisterRoutes(r)
+	onboardingCtrl.RegisterRoutes(r, authMW.Handler())
 	r.GET("/metrics", gin.WrapH(metricx.NewHandler(registry, &metricx.Options{})))
 
 	return &Container{

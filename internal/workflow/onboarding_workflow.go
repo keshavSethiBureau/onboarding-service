@@ -18,9 +18,10 @@ import (
 const TaskQueue = "onboarding-task-queue"
 
 // Register wires the workflow and activities onto a Temporal worker.
-func Register(r worker.Registry) {
+func Register(r worker.Registry, a *Activities) {
 	r.RegisterWorkflow(OnboardingWorkflow)
 	r.RegisterActivity(NoOp)
+	r.RegisterActivity(a.PersistJourneyState)
 }
 
 // OnboardingWorkflow is one workflow per user (WorkflowID = userId, LLD §5).

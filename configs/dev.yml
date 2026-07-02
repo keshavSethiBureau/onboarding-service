@@ -8,6 +8,13 @@ telemetry:
   serviceName: onboarding-service
   otlpEndpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://otel-eks.dev.internal}
 
+# Auth0 JWT (internal/auth). TODO: confirm the onboarding dev Auth0 tenant values.
+auth:
+  enabled: ${AUTH0_ENABLED:true}
+  issuer: ${AUTH0_ISSUER:}
+  audience: ${AUTH0_AUDIENCE:}
+  jwksUrl: ${AUTH0_JWKS_URL:}
+
 # Shared dev Apollo (see agent_docs / deployments/apollo README)
 apollo:
   enabled: true
