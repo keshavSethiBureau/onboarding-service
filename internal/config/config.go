@@ -16,6 +16,13 @@ type Config struct {
 	Telemetry   TelemetryConfig `yaml:"telemetry"`
 	Apollo      ApolloConfig    `yaml:"apollo"`
 	Auth        AuthConfig      `yaml:"auth"`
+	Internal    InternalConfig  `yaml:"internal"`
+}
+
+// InternalConfig guards the internal-network endpoints. An empty AuthToken
+// leaves them open (local dev); set it to require a shared secret header.
+type InternalConfig struct {
+	AuthToken string `yaml:"authToken"`
 }
 
 // AuthConfig holds Auth0 JWT validation settings. When Enabled is false the

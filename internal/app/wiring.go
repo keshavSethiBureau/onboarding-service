@@ -181,6 +181,11 @@ func Wire() (*Container, error) {
 	}
 	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo))
 
+	// internal endpoint (Auth Service only) — starts/signals the workflow.
+	starter := workflow.NewStarter(temporalClients.Client, workflow.TaskQueue)
+	internalCtrl := controller.NewInternalOnboardingController(starter)
+	internalGuard := auth.InternalTokenMiddleware(cfg.Internal.AuthToken)
+
 	// router: trace + count every request, then register routes.
 	r := gin.Default()
 	r.Use(otelgin.Middleware(cfg.Telemetry.ServiceName))
@@ -188,6 +193,7 @@ func Wire() (*Container, error) {
 	healthCtrl.RegisterRoutes(r)
 	verticalsCtrl.RegisterRoutes(r)
 	onboardingCtrl.RegisterRoutes(r, authMW.Handler())
+	internalCtrl.RegisterRoutes(r, internalGuard)
 	r.GET("/metrics", gin.WrapH(metricx.NewHandler(registry, &metricx.Options{})))
 
 	return &Container{

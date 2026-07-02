@@ -18,6 +18,10 @@ auth:
   audience: ""
   jwksUrl: ""
 
+# Internal-network endpoints (Auth Service only). Empty locally => open.
+internal:
+  authToken: ""
+
 # Apollo config client (bureau-commons-go/configlib). Empty metaAddr => the
 # vertical cache resolves from seeded defaults (no Apollo server needed).
 apollo:

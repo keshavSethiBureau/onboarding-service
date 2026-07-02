@@ -15,6 +15,10 @@ auth:
   audience: ${AUTH0_AUDIENCE:}
   jwksUrl: ${AUTH0_JWKS_URL:}
 
+# Internal-network endpoints (Auth Service only): require a shared secret header.
+internal:
+  authToken: ${INTERNAL_AUTH_TOKEN:}
+
 # Shared dev Apollo (see agent_docs / deployments/apollo README)
 apollo:
   enabled: true
