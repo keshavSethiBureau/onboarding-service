@@ -23,6 +23,10 @@ auth:
     domain: ""
     clientId: ""
     clientSecret: ""
+    audience: ""
+    usernamePasswordConnectionId: ""
+    ssoConnectionId: ""
+    ownerRoleId: ""
 
 # Internal-network endpoints (Auth Service only). Empty locally => open.
 internal:

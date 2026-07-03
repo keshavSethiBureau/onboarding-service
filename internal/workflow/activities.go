@@ -41,6 +41,7 @@ type ActionInput struct {
 	UserID      string `json:"userId"`
 	OrgID       string `json:"orgId"`
 	DisplayName string `json:"displayName"`
+	TncAccepted string `json:"tncAccepted"`
 }
 
 // ActionResult is the UNIFORM result. The executor merges any non-empty field
@@ -77,7 +78,9 @@ func (a *Activities) CreateOrganisation(ctx context.Context, in ActionInput) (Ac
 	} else if existing != nil && existing.OrgID != "" {
 		return ActionResult{OrgID: existing.OrgID}, nil
 	}
-	orgID, err := a.orgCreator.CreateOrganisation(ctx, in.UserID, in.DisplayName)
+	orgID, err := a.orgCreator.CreateOrganisation(ctx, auth0.CreateOrgInput{
+		UserID: in.UserID, DisplayName: in.DisplayName, TncAccepted: in.TncAccepted,
+	})
 	if err != nil {
 		return ActionResult{}, err
 	}

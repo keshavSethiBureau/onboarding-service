@@ -50,7 +50,7 @@ func driveAllSignals(t *testing.T, starter *Starter, client interface {
 	if _, err := starter.SubmitStep(ctx, userID, "", StepEmailVerified); err != nil {
 		t.Fatalf("EMAIL_VERIFIED: %v", err)
 	}
-	if _, err := starter.RequestOrganisation(ctx, userID, "Acme Inc"); err != nil {
+	if _, err := starter.RequestOrganisation(ctx, userID, "Acme Inc", "true"); err != nil {
 		t.Fatalf("ORGANISATION_CREATED: %v", err)
 	}
 	_ = client.SignalWorkflow(ctx, userID, "", StepVerticalSelected, SignalPayload{VerticalName: "KYC"})

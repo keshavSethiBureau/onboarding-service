@@ -4,22 +4,30 @@ package auth0
 
 import "context"
 
-// OrgCreator creates (or returns the existing) Auth0 organisation for a user.
+// CreateOrgInput carries the fields the organisation-creation flow needs. It
+// mirrors the auth service's POST /create-organisation inputs (userId from the
+// header, displayName + tncAccepted from the body).
+type CreateOrgInput struct {
+	UserID      string
+	DisplayName string
+	TncAccepted string // prod passes T&C acceptance through as a string
+}
+
+// OrgCreator creates the Auth0 organisation for a user and returns its id.
 //
-// Implementations MUST be idempotent by userId — N calls (sequential retries OR
-// concurrent) yield exactly one org and all return the same orgID (LLD §10).
-// This is the load-bearing invariant: the caller's crash-before-persist retry
-// window (activity creates the org, then dies before recording it) ultimately
-// rests on this contract. A real Auth0 client MUST therefore:
+// The contract mirrors the auth service (overwatch-authentication-service):
 //
-//  1. Derive the dedup key from userId only — NEVER a random/timestamped value.
-//  2. Tolerate a concurrent/prior create: use a stable, userId-derived org name
-//     and on 409 "name already exists" GET that org and return its id
-//     (Auth0's per-tenant name uniqueness becomes the dedup key).
-//  3. Ignore displayName for dedup — a retry may carry a different display name;
-//     the first org wins.
+//  1. One org per user — implementations first check whether the user already
+//     belongs to an org and reject if so (prod's is_user_owns_org guard).
+//  2. The org name is random (organisation_<uuid>); the user↔org membership is
+//     the dedup key, not the name.
+//  3. Creation is ATOMIC: the org, its enabled connections, the user's
+//     membership and the owner role are all established, or the org is deleted
+//     and an error returned (prod's delete-on-failure). This keeps a retrying
+//     caller (e.g. a Temporal activity) safe — a failed attempt leaves no
+//     partial org behind, so the next attempt starts clean.
 //
 // HTTPOrgCreator is the production implementation; tests use their own fakes.
 type OrgCreator interface {
-	CreateOrganisation(ctx context.Context, userID, displayName string) (orgID string, err error)
+	CreateOrganisation(ctx context.Context, in CreateOrgInput) (orgID string, err error)
 }

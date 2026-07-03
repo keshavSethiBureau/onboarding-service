@@ -59,12 +59,17 @@ type AuthConfig struct {
 	Management Auth0ManagementConfig `yaml:"management"`
 }
 
-// Auth0ManagementConfig holds the M2M credentials the CreateOrganisation
-// activity uses to call the Auth0 Management API.
+// Auth0ManagementConfig holds the M2M credentials and tenant object ids the
+// CreateOrganisation activity uses to call the Auth0 Management API. Mirrors the
+// auth service's AUTHENTICATION_SVC_* keys (audience, connections, owner role).
 type Auth0ManagementConfig struct {
-	Domain       string `yaml:"domain"`
-	ClientID     string `yaml:"clientId"`
-	ClientSecret string `yaml:"clientSecret"`
+	Domain                       string `yaml:"domain"`
+	ClientID                     string `yaml:"clientId"`
+	ClientSecret                 string `yaml:"clientSecret"`
+	Audience                     string `yaml:"audience"`
+	UsernamePasswordConnectionID string `yaml:"usernamePasswordConnectionId"`
+	SSOConnectionID              string `yaml:"ssoConnectionId"`
+	OwnerRoleID                  string `yaml:"ownerRoleId"`
 }
 
 // TelemetryConfig holds OpenTelemetry settings consumed by commons telemetry.

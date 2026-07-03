@@ -120,9 +120,15 @@ func Wire() (*Container, error) {
 	// They construct fine with empty config; only the actual Auth0/Svix/Lago/
 	// Kong/AWS calls fail until real config is provided (org-creation + complete
 	// flows). Non-external endpoints run regardless.
-	orgCreator, err := auth0.NewHTTPOrgCreator(
-		cfg.Auth.Management.Domain, cfg.Auth.Management.ClientID, cfg.Auth.Management.ClientSecret, registry,
-	)
+	orgCreator, err := auth0.NewHTTPOrgCreator(auth0.Auth0Settings{
+		Domain:                       cfg.Auth.Management.Domain,
+		ClientID:                     cfg.Auth.Management.ClientID,
+		ClientSecret:                 cfg.Auth.Management.ClientSecret,
+		Audience:                     cfg.Auth.Management.Audience,
+		UsernamePasswordConnectionID: cfg.Auth.Management.UsernamePasswordConnectionID,
+		SSOConnectionID:              cfg.Auth.Management.SSOConnectionID,
+		OwnerRoleID:                  cfg.Auth.Management.OwnerRoleID,
+	}, registry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init auth0 org creator: %w", err)
 	}

@@ -5,36 +5,64 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	hc "github.com/Bureau-Inc/bureau-commons-go/httpclient"
 	httpconfig "github.com/Bureau-Inc/bureau-commons-go/httpclient/config"
 	"github.com/Bureau-Inc/bureau-commons-go/httpclient/dtos"
-	httperr "github.com/Bureau-Inc/bureau-commons-go/httpclient/errors"
 	"github.com/Bureau-Inc/bureau-commons-go/metricx"
 )
 
 const (
 	svcAuth0 = "auth0mgmt"
 
-	apiToken        = "getToken"
-	apiCreateOrg    = "createOrg"
-	apiGetOrgByName = "getOrgByName"
+	apiToken      = "getToken"
+	apiCreateOrg  = "createOrg"
+	apiUserOrgs   = "getUserOrgs"
+	apiAddMembers = "addMembers"
+	apiAddRoles   = "addMemberRoles"
+	apiDeleteOrg  = "deleteOrg"
 
-	tokenExpiryBuffer = 60 * time.Second
+	// selfSignedUp mirrors the auth service, which hardcodes this on org metadata.
+	selfSignedUp = "True"
+
+	// tokenExpiryBuffer refetches the M2M token this long before it expires,
+	// matching the auth service (expires_in - 1000s).
+	tokenExpiryBuffer = 1000 * time.Second
+
+	// Bureau branding applied to every self-signup org (auth service parity).
+	brandPrimary = "#1C2D77"
+	brandPageBg  = "#F8F9FB"
 )
 
+// ErrUserAlreadyOwnsOrg mirrors the auth service's "User already has an
+// organisation" rejection (is_user_owns_org). Callers decide how to surface it
+// (e.g. a Temporal activity may wrap it as a non-retryable error).
+var ErrUserAlreadyOwnsOrg = errors.New("user already owns an organisation")
+
+// Auth0Settings holds the Auth0 Management credentials and the tenant object ids
+// the org-creation flow needs (connections to enable, the owner role to assign).
+type Auth0Settings struct {
+	Domain                       string
+	ClientID                     string
+	ClientSecret                 string
+	Audience                     string
+	UsernamePasswordConnectionID string
+	SSOConnectionID              string
+	OwnerRoleID                  string
+}
+
 // HTTPOrgCreator creates Auth0 organisations via the Management API over commons
-// httpclient. It is idempotent by userId: the org name is a deterministic slug
-// of the userId (Auth0 names are unique per tenant), and a 409 on create falls
-// back to reading the existing org by name.
+// httpclient, faithfully porting the auth service's create-organisation flow:
+// one org per user, a random org name, Bureau branding + metadata, both login
+// connections enabled, the user added as a member and given the owner role, with
+// delete-on-failure cleanup so a retry starts clean.
 type HTTPOrgCreator struct {
-	http         *hc.BureauHttpClient
-	domain       string
-	clientID     string
-	clientSecret string
+	http *hc.BureauHttpClient
+	cfg  Auth0Settings
 
 	mu    sync.Mutex
 	token string
@@ -42,16 +70,19 @@ type HTTPOrgCreator struct {
 }
 
 // NewHTTPOrgCreator builds the Auth0 Management org creator. Constructs fine with
-// empty config (calls will fail until real credentials are set).
-func NewHTTPOrgCreator(domain, clientID, clientSecret string, registry *metricx.Registry) (*HTTPOrgCreator, error) {
+// empty settings (calls fail until real credentials are supplied).
+func NewHTTPOrgCreator(s Auth0Settings, registry *metricx.Registry) (*HTTPOrgCreator, error) {
 	enableOTel := false
 	cfg := &httpconfig.HttpConfiguration{
 		EnableOpenTelemetry: &enableOTel,
 		ServiceConfigs: map[string]httpconfig.ServiceConfig{
-			svcAuth0: {BaseURL: domain, ApiConfigs: map[string]httpconfig.ApiConfig{
-				apiToken:        {Path: "/oauth/token", Method: "POST"},
-				apiCreateOrg:    {Path: "/api/v2/organizations", Method: "POST"},
-				apiGetOrgByName: {Path: "/api/v2/organizations/name/{name}", Method: "GET"},
+			svcAuth0: {BaseURL: s.Domain, ApiConfigs: map[string]httpconfig.ApiConfig{
+				apiToken:      {Path: "/oauth/token", Method: "POST"},
+				apiCreateOrg:  {Path: "/api/v2/organizations", Method: "POST"},
+				apiUserOrgs:   {Path: "/api/v2/users/{id}/organizations", Method: "GET"},
+				apiAddMembers: {Path: "/api/v2/organizations/{id}/members", Method: "POST"},
+				apiAddRoles:   {Path: "/api/v2/organizations/{id}/members/{userId}/roles", Method: "POST"},
+				apiDeleteOrg:  {Path: "/api/v2/organizations/{id}", Method: "DELETE"},
 			}},
 		},
 	}
@@ -59,7 +90,7 @@ func NewHTTPOrgCreator(domain, clientID, clientSecret string, registry *metricx.
 	if err != nil {
 		return nil, fmt.Errorf("build auth0 http client: %w", err)
 	}
-	return &HTTPOrgCreator{http: client, domain: domain, clientID: clientID, clientSecret: clientSecret}, nil
+	return &HTTPOrgCreator{http: client, cfg: s}, nil
 }
 
 type tokenResponse struct {
@@ -71,37 +102,94 @@ type orgResponse struct {
 	ID string `json:"id"`
 }
 
-// CreateOrganisation creates (or returns the existing) org for the user.
-func (c *HTTPOrgCreator) CreateOrganisation(ctx context.Context, userID, displayName string) (string, error) {
+// CreateOrganisation ports the auth service's create-organisation flow.
+func (c *HTTPOrgCreator) CreateOrganisation(ctx context.Context, in CreateOrgInput) (string, error) {
+	if !validDisplayName(in.DisplayName) {
+		return "", fmt.Errorf("invalid display name %q", in.DisplayName)
+	}
+
 	token, err := c.ensureToken(ctx)
 	if err != nil {
 		return "", err
 	}
-	name := orgName(userID)
 	auth := map[string]string{"Authorization": "Bearer " + token}
 
-	var created orgResponse
-	err = c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
-		ServiceName: svcAuth0, ApiName: apiCreateOrg, Headers: auth,
-		RequestBody: map[string]any{"name": name, "display_name": displayName},
-	}, &created)
-	if err == nil {
-		return created.ID, nil
+	// One org per user (auth service is_user_owns_org).
+	owns, err := c.userOwnsOrg(ctx, auth, in.UserID)
+	if err != nil {
+		return "", err
+	}
+	if owns {
+		return "", ErrUserAlreadyOwnsOrg
 	}
 
-	// Name already exists (idempotent): read the org by its stable name.
-	var clientErr *httperr.ClientError
-	if errors.As(err, &clientErr) && clientErr.StatusCode == 409 {
-		var existing orgResponse
-		if gerr := c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
-			ServiceName: svcAuth0, ApiName: apiGetOrgByName, Headers: auth,
-			PathParams: map[string]string{"name": name},
-		}, &existing); gerr != nil {
-			return "", fmt.Errorf("get existing org by name: %w", gerr)
-		}
-		return existing.ID, nil
+	// Create the org with a random name + Bureau branding, metadata and both
+	// login connections enabled.
+	name := "organisation_" + uuid.NewString()
+	var created orgResponse
+	if err := c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
+		ServiceName: svcAuth0, ApiName: apiCreateOrg, Headers: auth,
+		RequestBody: map[string]any{
+			"name":         name,
+			"display_name": in.DisplayName,
+			"branding":     map[string]any{"colors": map[string]any{"primary": brandPrimary, "page_background": brandPageBg}},
+			"metadata":     map[string]any{"self_signed_up": selfSignedUp, "isTermsAccepted": in.TncAccepted},
+			"enabled_connections": []map[string]any{
+				{"connection_id": c.cfg.UsernamePasswordConnectionID, "assign_membership_on_login": false},
+				{"connection_id": c.cfg.SSOConnectionID, "assign_membership_on_login": false},
+			},
+		},
+	}, &created); err != nil {
+		return "", fmt.Errorf("create organisation: %w", err)
 	}
-	return "", fmt.Errorf("create organisation: %w", err)
+
+	// Atomic: add the user as a member and grant the owner role. On failure,
+	// delete the org so a retry starts clean (auth service handle_create_org_error).
+	if err := c.addUserToOrg(ctx, auth, created.ID, in.UserID); err != nil {
+		c.deleteOrg(ctx, auth, created.ID) // best-effort cleanup
+		return "", err
+	}
+	return created.ID, nil
+}
+
+// addUserToOrg adds the user as an organisation member and assigns the owner role.
+func (c *HTTPOrgCreator) addUserToOrg(ctx context.Context, auth map[string]string, orgID, userID string) error {
+	if err := c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
+		ServiceName: svcAuth0, ApiName: apiAddMembers, Headers: auth,
+		PathParams:  map[string]string{"id": orgID},
+		RequestBody: map[string]any{"members": []string{userID}},
+	}, nil); err != nil {
+		return fmt.Errorf("add user to organisation: %w", err)
+	}
+	if err := c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
+		ServiceName: svcAuth0, ApiName: apiAddRoles, Headers: auth,
+		PathParams:  map[string]string{"id": orgID, "userId": userID},
+		RequestBody: map[string]any{"roles": []string{c.cfg.OwnerRoleID}},
+	}, nil); err != nil {
+		return fmt.Errorf("assign owner role: %w", err)
+	}
+	return nil
+}
+
+// deleteOrg best-effort removes an org during failure cleanup.
+func (c *HTTPOrgCreator) deleteOrg(ctx context.Context, auth map[string]string, orgID string) {
+	_ = c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
+		ServiceName: svcAuth0, ApiName: apiDeleteOrg, Headers: auth,
+		PathParams: map[string]string{"id": orgID},
+	}, nil)
+}
+
+// userOwnsOrg reports whether the user already belongs to any organisation.
+func (c *HTTPOrgCreator) userOwnsOrg(ctx context.Context, auth map[string]string, userID string) (bool, error) {
+	var orgs []orgResponse
+	if err := c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
+		ServiceName: svcAuth0, ApiName: apiUserOrgs, Headers: auth,
+		PathParams:  map[string]string{"id": userID},
+		QueryParams: map[string]string{"page": "0", "per_page": "10"},
+	}, &orgs); err != nil {
+		return false, fmt.Errorf("check user organisations: %w", err)
+	}
+	return len(orgs) > 0, nil
 }
 
 // ensureToken returns a cached M2M token, fetching a new one when absent/expired.
@@ -116,9 +204,9 @@ func (c *HTTPOrgCreator) ensureToken(ctx context.Context) (string, error) {
 		ServiceName: svcAuth0, ApiName: apiToken,
 		RequestBody: map[string]any{
 			"grant_type":    "client_credentials",
-			"client_id":     c.clientID,
-			"client_secret": c.clientSecret,
-			"audience":      strings.TrimRight(c.domain, "/") + "/api/v2/",
+			"client_id":     c.cfg.ClientID,
+			"client_secret": c.cfg.ClientSecret,
+			"audience":      c.cfg.Audience,
 		},
 	}, &resp); err != nil {
 		return "", fmt.Errorf("fetch auth0 m2m token: %w", err)
@@ -128,16 +216,13 @@ func (c *HTTPOrgCreator) ensureToken(ctx context.Context) (string, error) {
 	return c.token, nil
 }
 
-var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
+// displayNameRe encodes the auth service's valid_display_name rule: 2–100 chars,
+// unicode letters/numbers with interior spaces, underscores and dashes, starting
+// and ending alphanumeric (which also forbids leading/trailing whitespace). Go's
+// RE2 has no lookahead, but anchoring the first/last char is equivalent to prod's
+// (?!\s)(?!.*\s$) guards.
+var displayNameRe = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{N} _-]{0,98}[\p{L}\p{N}]$`)
 
-// orgName derives a deterministic, Auth0-valid org name from the userId. The
-// userId is the sole dedup key (no randomness), so retries reuse the same name.
-func orgName(userID string) string {
-	s := nonSlug.ReplaceAllString(strings.ToLower(userID), "-")
-	s = strings.Trim(s, "-")
-	name := "org-" + s
-	if len(name) > 50 {
-		name = name[:50]
-	}
-	return name
+func validDisplayName(s string) bool {
+	return displayNameRe.MatchString(s)
 }

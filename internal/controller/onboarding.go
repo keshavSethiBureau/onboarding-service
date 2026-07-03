@@ -68,8 +68,12 @@ func (c *OnboardingController) CreateOrganisation(ctx *gin.Context) {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "display_name is required"})
 		return
 	}
+	if req.TncAccepted == "" {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "tnc_accepted is required"})
+		return
+	}
 
-	runID, err := c.starter.RequestOrganisation(ctx.Request.Context(), userID, req.DisplayName)
+	runID, err := c.starter.RequestOrganisation(ctx.Request.Context(), userID, req.DisplayName, req.TncAccepted)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "failed to request organisation creation"})
 		return

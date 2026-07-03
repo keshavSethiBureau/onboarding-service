@@ -27,6 +27,7 @@ type WorkflowInput struct {
 type SignalPayload struct {
 	DisplayName  string `json:"displayName"`
 	VerticalName string `json:"verticalName"`
+	TncAccepted  string `json:"tncAccepted"`
 }
 
 // Register wires the workflow and activities onto a Temporal worker. Activities
@@ -76,6 +77,7 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 	// Journey context threaded across steps (no read-model round-trips).
 	orgID := ""
 	displayName := ""
+	tncAccepted := ""
 
 	for _, step := range CatalogSteps(version) {
 		// 1. Persist where the user is (drives the resume screen while awaiting a signal).
@@ -94,13 +96,16 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			if p.VerticalName != "" {
 				journey.VerticalName = p.VerticalName
 			}
+			if p.TncAccepted != "" {
+				tncAccepted = p.TncAccepted
+			}
 		}
 
 		// 3. Run the step's action (dispatched by name); merge its result.
 		if step.Action != "" {
 			var res ActionResult
 			if err := workflow.ExecuteActivity(ctx, step.Action, ActionInput{
-				UserID: journey.UserID, OrgID: orgID, DisplayName: displayName,
+				UserID: journey.UserID, OrgID: orgID, DisplayName: displayName, TncAccepted: tncAccepted,
 			}).Get(ctx, &res); err != nil {
 				return err
 			}

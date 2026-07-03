@@ -56,9 +56,10 @@ func (s *Starter) SubmitStep(ctx context.Context, userID, _ /*orgID*/, stepName 
 	return s.signalStep(ctx, userID, stepName, SignalPayload{})
 }
 
-// RequestOrganisation signals the ORGANISATION_CREATED step with the display name.
-func (s *Starter) RequestOrganisation(ctx context.Context, userID, displayName string) (string, error) {
-	return s.signalStep(ctx, userID, StepOrganisationCreated, SignalPayload{DisplayName: displayName})
+// RequestOrganisation signals the ORGANISATION_CREATED step with the display name
+// and the user's T&C acceptance.
+func (s *Starter) RequestOrganisation(ctx context.Context, userID, displayName, tncAccepted string) (string, error) {
+	return s.signalStep(ctx, userID, StepOrganisationCreated, SignalPayload{DisplayName: displayName, TncAccepted: tncAccepted})
 }
 
 // RequestComplete signals the ONBOARDING_COMPLETED step.

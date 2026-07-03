@@ -15,9 +15,13 @@ auth:
   audience: ${AUTH0_AUDIENCE:}
   jwksUrl: ${AUTH0_JWKS_URL:}
   management:
-    domain: ${AUTH0_MGMT_DOMAIN:}
-    clientId: ${AUTH0_MGMT_CLIENT_ID:}
-    clientSecret: ${AUTH0_MGMT_CLIENT_SECRET:}
+    domain: ${AUTHENTICATION_SVC_AUTH0_DOMAIN:}
+    clientId: ${AUTHENTICATION_SVC_AUTH0_MANAGEMENT_APP_CLIENT_ID:}
+    clientSecret: ${AUTHENTICATION_SVC_AUTH0_MANAGEMENT_APP_CLIENT_SECRET:}
+    audience: ${AUTHENTICATION_SVC_AUTH0_SUPER_M2M_AUDIENCE:}
+    usernamePasswordConnectionId: ${AUTHENTICATION_SVC_AUTH0_USERNAME_PASSWORD_CONNECTION_ID:}
+    ssoConnectionId: ${AUTHENTICATION_SVC_AUTH0_SSO_CONNECTION_ID:}
+    ownerRoleId: ${AUTHENTICATION_SVC_AUTH0_OWNER_ROLE_ID:}
 
 # Internal-network endpoints (Auth Service only): require a shared secret header.
 internal:

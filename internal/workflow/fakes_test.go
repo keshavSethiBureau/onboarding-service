@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"onboarding-service/internal/platform/auth0"
 	"onboarding-service/internal/repo"
 )
 
@@ -71,9 +72,9 @@ func cloneRecord(r *repo.ProvisioningRecordDoc) *repo.ProvisioningRecordDoc {
 // countingOrgCreator records how many times the Auth0 org creation runs.
 type countingOrgCreator struct{ calls int }
 
-func (c *countingOrgCreator) CreateOrganisation(_ context.Context, userID, _ string) (string, error) {
+func (c *countingOrgCreator) CreateOrganisation(_ context.Context, in auth0.CreateOrgInput) (string, error) {
 	c.calls++
-	return "org_" + userID, nil
+	return "org_" + in.UserID, nil
 }
 
 // countingProvisioner records how many times each provisioning action runs.

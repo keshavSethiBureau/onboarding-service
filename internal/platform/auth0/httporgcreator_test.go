@@ -3,127 +3,207 @@ package auth0
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Bureau-Inc/bureau-commons-go/metricx"
 )
 
-// mockAuth0 is a minimal Auth0 Management API: issues a token, creates an org
-// once per name (409 on a repeat), and serves get-by-name.
+// mockAuth0 is a minimal Auth0 Management API covering the org-creation flow:
+// token, user's orgs (for the owns-org guard), create org, add member, assign
+// role, delete org. Counters + captured bodies let tests assert the sequence.
 type mockAuth0 struct {
-	mu       sync.Mutex
-	byName   map[string]string // name -> id
-	creates  int
-	tokenGET int
+	mu sync.Mutex
+
+	userOrgs  []string // preloaded orgs the user already belongs to
+	failRoles bool     // make the assign-role call fail (to exercise cleanup)
+
+	creates, members, roles, deletes int
+	lastCreateBody                   map[string]any
+	lastRolesBody                    map[string]any
 }
 
 func (m *mockAuth0) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
-		m.mu.Lock()
-		m.tokenGET++
-		m.mu.Unlock()
+
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":86400}`))
 	})
-	mux.HandleFunc("/api/v2/organizations", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost { // ignore httpclient HEAD warmup probes
+
+	// GET /api/v2/users/{id}/organizations
+	mux.HandleFunc("/api/v2/users/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
 			return
 		}
-		var body struct {
-			Name string `json:"name"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
 		m.mu.Lock()
-		defer m.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		if _, exists := m.byName[body.Name]; exists {
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"statusCode":409,"error":"Conflict"}`))
-			return
+		orgs := make([]map[string]string, 0, len(m.userOrgs))
+		for _, id := range m.userOrgs {
+			orgs = append(orgs, map[string]string{"id": id})
 		}
-		m.creates++
-		id := "org_id_" + body.Name
-		m.byName[body.Name] = id
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"` + id + `"}`))
-	})
-	mux.HandleFunc("/api/v2/organizations/name/", func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Path[len("/api/v2/organizations/name/"):]
-		m.mu.Lock()
-		id := m.byName[name]
 		m.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"` + id + `"}`))
+		_ = json.NewEncoder(w).Encode(orgs)
 	})
+
+	// POST /api/v2/organizations (exact) — create
+	mux.HandleFunc("/api/v2/organizations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		_ = json.NewDecoder(r.Body).Decode(&m.lastCreateBody)
+		m.creates++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"org_created_1"}`))
+	})
+
+	// /api/v2/organizations/{id}[/members[/{userId}/roles]] — members, roles, delete
+	mux.HandleFunc("/api/v2/organizations/", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		switch {
+		case r.Method == http.MethodDelete:
+			m.deletes++
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/roles"):
+			_ = json.NewDecoder(r.Body).Decode(&m.lastRolesBody)
+			m.roles++
+			if m.failRoles {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/members"):
+			m.members++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			// ignore HEAD warmup probes / anything else
+		}
+	})
+
 	return mux
+}
+
+func testSettings(url string) Auth0Settings {
+	return Auth0Settings{
+		Domain:                       url,
+		ClientID:                     "cid",
+		ClientSecret:                 "secret",
+		Audience:                     "https://api/",
+		UsernamePasswordConnectionID: "con_userpass",
+		SSOConnectionID:              "con_sso",
+		OwnerRoleID:                  "role_owner",
+	}
 }
 
 func newTestOrgCreator(t *testing.T, url string) *HTTPOrgCreator {
 	t.Helper()
-	c, err := NewHTTPOrgCreator(url, "cid", "secret", metricx.NewRegistry())
+	c, err := NewHTTPOrgCreator(testSettings(url), metricx.NewRegistry())
 	if err != nil {
 		t.Fatalf("NewHTTPOrgCreator: %v", err)
 	}
 	return c
 }
 
-func TestHTTPOrgCreator_CreatesOnce(t *testing.T) {
-	mock := &mockAuth0{byName: map[string]string{}}
+// TestHTTPOrgCreator_CreateFlow proves the full prod-faithful sequence: create
+// org (with connections/branding/metadata), add member, assign owner role.
+func TestHTTPOrgCreator_CreateFlow(t *testing.T) {
+	mock := &mockAuth0{}
 	srv := httptest.NewServer(mock.handler())
 	defer srv.Close()
 
 	c := newTestOrgCreator(t, srv.URL)
-	id, err := c.CreateOrganisation(context.Background(), "auth0|abc123", "Acme Inc")
+	id, err := c.CreateOrganisation(context.Background(), CreateOrgInput{
+		UserID: "auth0|abc123", DisplayName: "Acme Inc", TncAccepted: "true",
+	})
 	if err != nil {
 		t.Fatalf("CreateOrganisation: %v", err)
 	}
-	if id == "" {
-		t.Fatal("empty org id")
+	if id != "org_created_1" {
+		t.Fatalf("org id = %q, want org_created_1", id)
 	}
-	if mock.creates != 1 {
-		t.Fatalf("creates = %d, want 1", mock.creates)
+	if mock.creates != 1 || mock.members != 1 || mock.roles != 1 || mock.deletes != 0 {
+		t.Fatalf("sequence = creates:%d members:%d roles:%d deletes:%d, want 1/1/1/0",
+			mock.creates, mock.members, mock.roles, mock.deletes)
+	}
+
+	// Create body carries both connections, branding and metadata.
+	conns, _ := mock.lastCreateBody["enabled_connections"].([]any)
+	if len(conns) != 2 {
+		t.Fatalf("enabled_connections = %v, want 2", mock.lastCreateBody["enabled_connections"])
+	}
+	meta, _ := mock.lastCreateBody["metadata"].(map[string]any)
+	if meta["isTermsAccepted"] != "true" || meta["self_signed_up"] != "True" {
+		t.Errorf("metadata = %v, want isTermsAccepted=true self_signed_up=True", meta)
+	}
+	if mock.lastCreateBody["branding"] == nil {
+		t.Error("branding missing from create body")
+	}
+	// Owner role assigned from config.
+	if roles, _ := mock.lastRolesBody["roles"].([]any); len(roles) != 1 || roles[0] != "role_owner" {
+		t.Errorf("roles body = %v, want [role_owner]", mock.lastRolesBody["roles"])
 	}
 }
 
-// TestHTTPOrgCreator_Idempotent proves a repeat call for the same user does NOT
-// create a second org: the 409 on the stable name falls back to get-by-name and
-// returns the same id.
-func TestHTTPOrgCreator_Idempotent(t *testing.T) {
-	mock := &mockAuth0{byName: map[string]string{}}
+// TestHTTPOrgCreator_RejectsWhenUserOwnsOrg mirrors is_user_owns_org: a user who
+// already belongs to an org is rejected, and no org is created.
+func TestHTTPOrgCreator_RejectsWhenUserOwnsOrg(t *testing.T) {
+	mock := &mockAuth0{userOrgs: []string{"org_existing"}}
 	srv := httptest.NewServer(mock.handler())
 	defer srv.Close()
 
 	c := newTestOrgCreator(t, srv.URL)
-	ctx := context.Background()
-
-	id1, err := c.CreateOrganisation(ctx, "auth0|abc123", "Acme Inc")
-	if err != nil {
-		t.Fatalf("first: %v", err)
+	_, err := c.CreateOrganisation(context.Background(), CreateOrgInput{
+		UserID: "auth0|abc123", DisplayName: "Acme Inc", TncAccepted: "true",
+	})
+	if !errors.Is(err, ErrUserAlreadyOwnsOrg) {
+		t.Fatalf("err = %v, want ErrUserAlreadyOwnsOrg", err)
 	}
-	// A different HTTPOrgCreator (fresh token cache) simulates a retry/replay on
-	// another worker; same userId -> same org, no second create.
-	c2 := newTestOrgCreator(t, srv.URL)
-	id2, err := c2.CreateOrganisation(ctx, "auth0|abc123", "Acme Renamed")
-	if err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	if id1 != id2 {
-		t.Fatalf("ids differ (%q != %q) — duplicate org created", id1, id2)
-	}
-	if mock.creates != 1 {
-		t.Fatalf("creates = %d, want exactly 1 (idempotent by userId)", mock.creates)
+	if mock.creates != 0 {
+		t.Fatalf("creates = %d, want 0 (guard should short-circuit)", mock.creates)
 	}
 }
 
-func TestOrgName_Deterministic(t *testing.T) {
-	if a, b := orgName("auth0|Abc 123"), orgName("auth0|Abc 123"); a != b {
-		t.Fatalf("non-deterministic: %q vs %q", a, b)
+// TestHTTPOrgCreator_DeletesOnFailure proves the atomic cleanup: if assigning the
+// owner role fails, the just-created org is deleted and an error is returned.
+func TestHTTPOrgCreator_DeletesOnFailure(t *testing.T) {
+	mock := &mockAuth0{failRoles: true}
+	srv := httptest.NewServer(mock.handler())
+	defer srv.Close()
+
+	c := newTestOrgCreator(t, srv.URL)
+	_, err := c.CreateOrganisation(context.Background(), CreateOrgInput{
+		UserID: "auth0|abc123", DisplayName: "Acme Inc", TncAccepted: "true",
+	})
+	if err == nil {
+		t.Fatal("expected error when role assignment fails")
 	}
-	if got := orgName("auth0|abc"); got != "org-auth0-abc" {
-		t.Errorf("orgName = %q, want org-auth0-abc", got)
+	if mock.creates != 1 || mock.deletes != 1 {
+		t.Fatalf("creates:%d deletes:%d, want 1/1 (org must be cleaned up)", mock.creates, mock.deletes)
+	}
+}
+
+func TestValidDisplayName(t *testing.T) {
+	valid := []string{"Ab", "Acme Inc", "Bureau_123", "a-b c", "Åcmé 2"}
+	invalid := []string{"", "a", " Acme", "Acme ", "a<b>", "x=y", strings.Repeat("a", 101)}
+	for _, s := range valid {
+		if !validDisplayName(s) {
+			t.Errorf("validDisplayName(%q) = false, want true", s)
+		}
+	}
+	for _, s := range invalid {
+		if validDisplayName(s) {
+			t.Errorf("validDisplayName(%q) = true, want false", s)
+		}
 	}
 }
