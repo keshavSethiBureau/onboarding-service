@@ -34,4 +34,9 @@ type StepSummaryDoc struct {
 type OnboardingJourneyRepo interface {
 	Upsert(ctx context.Context, doc *OnboardingJourneyDoc) error
 	FindByUserID(ctx context.Context, userID string) (*OnboardingJourneyDoc, error)
+	// SetOrgID sets only the orgId field (upsert keyed by userId), without
+	// touching the rest of the journey. Used as the in-service idempotency
+	// backstop for org creation: the activity records the orgId immediately
+	// after Auth0 returns, so a crash-then-retry sees it and skips re-creating.
+	SetOrgID(ctx context.Context, userID, orgID string) error
 }

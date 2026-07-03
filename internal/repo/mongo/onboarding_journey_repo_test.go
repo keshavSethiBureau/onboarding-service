@@ -10,7 +10,7 @@ import (
 	mongoclient "github.com/Bureau-Inc/bureau-commons-go/mongoclient"
 	mongoconfig "github.com/Bureau-Inc/bureau-commons-go/mongoclient/config"
 
-	"github.com/bureau/onboarding-service/internal/repo"
+	"onboarding-service/internal/repo"
 )
 
 // testRepo connects to a local Mongo (MONGO_TEST_URI host or localhost:27017) in

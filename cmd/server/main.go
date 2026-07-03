@@ -4,7 +4,7 @@ package main
 import (
 	"log"
 
-	"github.com/bureau/onboarding-service/internal/app"
+	"onboarding-service/internal/app"
 )
 
 func main() {

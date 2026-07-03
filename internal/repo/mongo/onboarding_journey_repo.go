@@ -12,7 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
-	"github.com/bureau/onboarding-service/internal/repo"
+	"onboarding-service/internal/repo"
 )
 
 // OnboardingJourneyRepo is the Mongo implementation of repo.OnboardingJourneyRepo.
@@ -41,6 +41,29 @@ func (r *OnboardingJourneyRepo) Upsert(ctx context.Context, doc *repo.Onboarding
 		bson.M{"userId": doc.UserID},
 		doc,
 		options.Replace().SetUpsert(true),
+	)
+	if !result.Success {
+		return result.Error
+	}
+	return nil
+}
+
+// SetOrgID sets only the orgId (upsert keyed by userId), leaving the rest of the
+// journey untouched. $setOnInsert pins _id=userId so a fresh doc gets a stable
+// string id (no ObjectID) if org creation precedes any step.
+func (r *OnboardingJourneyRepo) SetOrgID(ctx context.Context, userID, orgID string) error {
+	now := time.Now().UTC()
+	result := r.client.UpdateOne(
+		ctx,
+		repo.CollOnboardingJourneys,
+		bson.M{"userId": userID},
+		bson.M{
+			"$set": bson.M{"orgId": orgID, "updatedAt": now},
+			"$setOnInsert": bson.M{
+				"_id": userID, "status": "in_progress", "startedAt": now,
+			},
+		},
+		options.UpdateOne().SetUpsert(true),
 	)
 	if !result.Success {
 		return result.Error

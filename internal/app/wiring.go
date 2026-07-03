@@ -28,13 +28,15 @@ import (
 	sdkclient "go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/bureau/onboarding-service/internal/auth"
-	"github.com/bureau/onboarding-service/internal/config"
-	"github.com/bureau/onboarding-service/internal/controller"
-	"github.com/bureau/onboarding-service/internal/repo"
-	mongorepo "github.com/bureau/onboarding-service/internal/repo/mongo"
-	"github.com/bureau/onboarding-service/internal/service/impl"
-	"github.com/bureau/onboarding-service/internal/workflow"
+	"onboarding-service/internal/auth"
+	"onboarding-service/internal/config"
+	"onboarding-service/internal/controller"
+	"onboarding-service/internal/platform/auth0"
+	"onboarding-service/internal/platform/provisioning"
+	"onboarding-service/internal/repo"
+	mongorepo "onboarding-service/internal/repo/mongo"
+	"onboarding-service/internal/service/impl"
+	"onboarding-service/internal/workflow"
 )
 
 // mongoConnectTimeout bounds the startup connect + index creation.
@@ -112,6 +114,28 @@ func Wire() (*Container, error) {
 
 	// repositories (DAO layer)
 	journeyRepo := mongorepo.NewOnboardingJourneyRepo(mongoCli)
+	provisioningRepo := mongorepo.NewProvisioningRecordRepo(mongoCli)
+
+	// external integration ports — always the real clients (no stub fallback).
+	// They construct fine with empty config; only the actual Auth0/Svix/Lago/
+	// Kong/AWS calls fail until real config is provided (org-creation + complete
+	// flows). Non-external endpoints run regardless.
+	orgCreator, err := auth0.NewHTTPOrgCreator(
+		cfg.Auth.Management.Domain, cfg.Auth.Management.ClientID, cfg.Auth.Management.ClientSecret, registry,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init auth0 org creator: %w", err)
+	}
+	provisioner, err := provisioning.NewHTTPProvisioner(mongoCtx, provisioning.Settings{
+		SvixBaseURL: cfg.Provisioning.Svix.BaseURL, SvixToken: cfg.Provisioning.Svix.Token,
+		LagoBaseURL: cfg.Provisioning.Lago.BaseURL, LagoToken: cfg.Provisioning.Lago.Token,
+		KongBaseURL:    cfg.Provisioning.Kong.BaseURL,
+		AWSRegion:      cfg.Provisioning.AWS.Region,
+		AWSUsagePlanID: cfg.Provisioning.AWS.UsagePlanID,
+	}, registry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init provisioner: %w", err)
+	}
 
 	// configlib (Apollo) — load verticals + questions into a per-instance cache
 	// that hot-reloads. With an empty MetaAddr this resolves from the seeded
@@ -145,13 +169,14 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init temporal factory: %w", err)
 	}
-	activities := workflow.NewActivities(journeyRepo)
+	activities := workflow.NewActivities(journeyRepo, provisioningRepo, orgCreator, provisioner)
 	temporalClients, temporalWorker, err := tfactory.StartWorker(mongoCtx, workflow.TaskQueue, func(r worker.Registry) {
 		workflow.Register(r, activities)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to start temporal worker: %w", err)
 	}
+	starter := workflow.NewStarter(temporalClients.Client, workflow.TaskQueue)
 
 	// controllers — readiness requires Mongo, a non-empty cache, AND Temporal.
 	healthCtrl := controller.NewHealthController(
@@ -179,10 +204,9 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init auth: %w", err)
 	}
-	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo))
+	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter)
 
 	// internal endpoint (Auth Service only) — starts/signals the workflow.
-	starter := workflow.NewStarter(temporalClients.Client, workflow.TaskQueue)
 	internalCtrl := controller.NewInternalOnboardingController(starter)
 	internalGuard := auth.InternalTokenMiddleware(cfg.Internal.AuthToken)
 

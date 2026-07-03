@@ -17,10 +17,24 @@ auth:
   issuer: ""
   audience: ""
   jwksUrl: ""
+  # Auth0 Management (org creation). Empty locally: org-creation calls will fail
+  # without real creds (no stub fallback) — point at a mock or set creds to use it.
+  management:
+    domain: ""
+    clientId: ""
+    clientSecret: ""
 
 # Internal-network endpoints (Auth Service only). Empty locally => open.
 internal:
   authToken: ""
+
+# Post-org provisioning. Empty base URLs => the no-op stub provisioner is used
+# locally (no external Svix/Lago/Kong/AWS reachable).
+provisioning:
+  svix: { baseUrl: "", token: "" }
+  lago: { baseUrl: "", token: "" }
+  kong: { baseUrl: "" }
+  aws: { region: "", usagePlanId: "" }
 
 # Apollo config client (bureau-commons-go/configlib). Empty metaAddr => the
 # vertical cache resolves from seeded defaults (no Apollo server needed).

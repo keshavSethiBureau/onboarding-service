@@ -14,10 +14,28 @@ auth:
   issuer: ${AUTH0_ISSUER:}
   audience: ${AUTH0_AUDIENCE:}
   jwksUrl: ${AUTH0_JWKS_URL:}
+  management:
+    domain: ${AUTH0_MGMT_DOMAIN:}
+    clientId: ${AUTH0_MGMT_CLIENT_ID:}
+    clientSecret: ${AUTH0_MGMT_CLIENT_SECRET:}
 
 # Internal-network endpoints (Auth Service only): require a shared secret header.
 internal:
   authToken: ${INTERNAL_AUTH_TOKEN:}
+
+# Post-org provisioning (real Svix/Lago/Kong via httpclient + AWS via SDK when set).
+provisioning:
+  svix:
+    baseUrl: ${SVIX_BASE_URL:}
+    token: ${SVIX_API_TOKEN:}
+  lago:
+    baseUrl: ${LAGO_BASE_URL:}
+    token: ${LAGO_API_TOKEN:}
+  kong:
+    baseUrl: ${KONG_ADMIN_URL:}
+  aws:
+    region: ${AWS_REGION:ap-south-1}
+    usagePlanId: ${AWS_BASIC_USAGE_PLAN_ID:}
 
 # Shared dev Apollo (see agent_docs / deployments/apollo README)
 apollo:

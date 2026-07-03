@@ -4,8 +4,8 @@
 package adapters
 
 import (
-	"github.com/bureau/onboarding-service/internal/repo"
-	"github.com/bureau/onboarding-service/internal/service/dto"
+	"onboarding-service/internal/repo"
+	"onboarding-service/internal/service/dto"
 )
 
 // ToRepoOnboardingJourney converts a service DTO to the Mongo DAO, including the

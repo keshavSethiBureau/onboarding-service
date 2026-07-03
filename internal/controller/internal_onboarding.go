@@ -5,8 +5,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/bureau/onboarding-service/internal/workflow"
-	"github.com/bureau/onboarding-service/pkg/view"
+	"onboarding-service/internal/workflow"
+	"onboarding-service/pkg/view"
 )
 
 // InternalOnboardingController serves the Auth Service's only call: recording an

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bureau/onboarding-service/internal/service/dto"
+	"onboarding-service/internal/service/dto"
 )
 
 func TestOnboardingJourneyRoundTrip(t *testing.T) {

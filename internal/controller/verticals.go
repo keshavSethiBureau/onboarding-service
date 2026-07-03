@@ -5,7 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/bureau/onboarding-service/internal/config"
+	"onboarding-service/internal/config"
 )
 
 // VerticalsController serves the public verticals listing from the in-memory

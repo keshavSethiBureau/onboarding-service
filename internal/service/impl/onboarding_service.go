@@ -3,10 +3,10 @@ package impl
 import (
 	"context"
 
-	"github.com/bureau/onboarding-service/internal/repo"
-	"github.com/bureau/onboarding-service/internal/service/dto"
-	"github.com/bureau/onboarding-service/internal/service/dto/adapters"
-	"github.com/bureau/onboarding-service/internal/workflow"
+	"onboarding-service/internal/repo"
+	"onboarding-service/internal/service/dto"
+	"onboarding-service/internal/service/dto/adapters"
+	"onboarding-service/internal/workflow"
 )
 
 // OnboardingService is the business-logic layer for onboarding reads.

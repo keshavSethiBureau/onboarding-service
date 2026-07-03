@@ -12,11 +12,35 @@ type Config struct {
 	Server struct {
 		Port string `yaml:"port"`
 	} `yaml:"server"`
-	Environment string          `yaml:"environment"`
-	Telemetry   TelemetryConfig `yaml:"telemetry"`
-	Apollo      ApolloConfig    `yaml:"apollo"`
-	Auth        AuthConfig      `yaml:"auth"`
-	Internal    InternalConfig  `yaml:"internal"`
+	Environment  string             `yaml:"environment"`
+	Telemetry    TelemetryConfig    `yaml:"telemetry"`
+	Apollo       ApolloConfig       `yaml:"apollo"`
+	Auth         AuthConfig         `yaml:"auth"`
+	Internal     InternalConfig     `yaml:"internal"`
+	Provisioning ProvisioningConfig `yaml:"provisioning"`
+}
+
+// ProvisioningConfig holds the post-org provisioning integrations. When the
+// endpoints are empty (local dev) the service falls back to a no-op stub
+// provisioner; when set it uses the real Svix/Lago/Kong (httpclient) and AWS
+// (SDK) clients.
+type ProvisioningConfig struct {
+	Svix ExternalServiceConfig `yaml:"svix"`
+	Lago ExternalServiceConfig `yaml:"lago"`
+	Kong ExternalServiceConfig `yaml:"kong"`
+	AWS  AWSProvisioningConfig `yaml:"aws"`
+}
+
+// ExternalServiceConfig is an HTTP integration's base URL + bearer token.
+type ExternalServiceConfig struct {
+	BaseURL string `yaml:"baseUrl"`
+	Token   string `yaml:"token"`
+}
+
+// AWSProvisioningConfig configures the API Gateway usage-plan integration.
+type AWSProvisioningConfig struct {
+	Region      string `yaml:"region"`
+	UsagePlanID string `yaml:"usagePlanId"`
 }
 
 // InternalConfig guards the internal-network endpoints. An empty AuthToken
@@ -28,10 +52,19 @@ type InternalConfig struct {
 // AuthConfig holds Auth0 JWT validation settings. When Enabled is false the
 // middleware runs in dev mode (identity from X-User-Id/X-Org-Id headers).
 type AuthConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Issuer   string `yaml:"issuer"`
-	Audience string `yaml:"audience"`
-	JWKSURL  string `yaml:"jwksUrl"`
+	Enabled    bool                  `yaml:"enabled"`
+	Issuer     string                `yaml:"issuer"`
+	Audience   string                `yaml:"audience"`
+	JWKSURL    string                `yaml:"jwksUrl"`
+	Management Auth0ManagementConfig `yaml:"management"`
+}
+
+// Auth0ManagementConfig holds the M2M credentials the CreateOrganisation
+// activity uses to call the Auth0 Management API.
+type Auth0ManagementConfig struct {
+	Domain       string `yaml:"domain"`
+	ClientID     string `yaml:"clientId"`
+	ClientSecret string `yaml:"clientSecret"`
 }
 
 // TelemetryConfig holds OpenTelemetry settings consumed by commons telemetry.
