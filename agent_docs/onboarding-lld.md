@@ -84,12 +84,30 @@ to the first step they have not completed.
 
 ## 5. Temporal design
 
+- **Step execution = versioned catalog + generic executor.** The step sequence is
+  DATA: a catalog mapping a version number to an ordered list of step definitions,
+  each naming a step and the activity (action) to run. `OnboardingWorkflow` is a
+  generic executor that reads `stepCatalog[journey.StepCatalogVersion]` and walks it —
+  no hardcoded `if step == X` branches. Adding/editing/removing a step = a new catalog
+  version (data), never an executor edit.
+- **Catalog immutability (determinism rule):** once any journey runs on a catalog
+  version, that version's contents are IMMUTABLE. A change means a NEW version. This
+  keeps Temporal replay deterministic (the workflow takes the same path on replay) and
+  leaves in-flight journeys undisturbed. New journeys start on the latest version;
+  in-flight journeys keep their pinned `StepCatalogVersion`.
+- **Determinism:** the workflow function must be deterministic — no `time.Now`, no
+  random, no direct DB/HTTP, no map-iteration-order dependence. All side effects live
+  in activities.
+- **Granular activities (not one mega-activity):** one activity per side effect, so
+  each step retries/recovers independently. A single activity doing everything would
+  re-run already-succeeded work on any failure and discard Temporal's core value.
 - **Workflow:** `OnboardingWorkflow`, one per user (WorkflowID = userId), started
-  when the first step signal arrives (EMAIL_VERIFIED) or on session create.
+  when the first step signal arrives (EMAIL_VERIFIED).
 - **Signals:** the Auth Service (and the frontend) advance the workflow by sending
   signals — e.g. `EmailVerified`, `OrganisationCreated`, `VerticalSelected`,
-  `QuestionnaireViewed`, `Complete`. Human-paced waits are just the workflow
-  awaiting the next signal.
+  `QuestionnaireViewed`, `Complete`. A step needing user input receives that input as
+  the signal payload. Human-paced waits are just the workflow durably awaiting the
+  next signal (it can park for days across restarts).
 - **Activities (each with a retry policy):**
   - `CreateOrganisation` — calls Auth0 to create the org (idempotent by userId/request key).
   - `PersistJourneyState` — upsert the denormalised journey read-model in Mongo.
@@ -98,8 +116,10 @@ to the first step they have not completed.
     Service's org-creation flow (TBD from code).
   - `ProvisionSvix` — create the Svix application (idempotent; keyed by orgId).
   - `ProvisionLago` — create the Lago customer (idempotent; keyed by orgId).
-- **Resume:** if the process crashes, Temporal resumes the workflow from its last
-  event; the Mongo read-model is kept current by `PersistJourneyState`.
+- **Resume:** no manual resume logic. On crash, Temporal replays the workflow from
+  history — completed activities return from history without re-running, and execution
+  comes to rest exactly where it was (e.g. parked awaiting the next signal). The Mongo
+  read-model is kept current by `PersistJourneyState` and serves the resume-screen read.
 - **Idempotency:** provisioning activities use orgId as an idempotency key so
   retries never double-provision (belt-and-suspenders with the unique orgId index).
 

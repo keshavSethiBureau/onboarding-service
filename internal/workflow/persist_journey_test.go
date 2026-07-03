@@ -8,8 +8,8 @@ import (
 
 	"go.temporal.io/sdk/testsuite"
 
-	"github.com/bureau/onboarding-service/internal/repo"
-	"github.com/bureau/onboarding-service/internal/service/dto"
+	"onboarding-service/internal/repo"
+	"onboarding-service/internal/service/dto"
 )
 
 // fakeJourneyRepo captures the doc passed to Upsert so the activity's
@@ -27,6 +27,8 @@ func (f *fakeJourneyRepo) Upsert(_ context.Context, doc *repo.OnboardingJourneyD
 func (f *fakeJourneyRepo) FindByUserID(context.Context, string) (*repo.OnboardingJourneyDoc, error) {
 	return nil, nil
 }
+
+func (f *fakeJourneyRepo) SetOrgID(context.Context, string, string) error { return nil }
 
 func TestPersistJourneyStateActivity(t *testing.T) {
 	completed := time.Date(2026, 7, 2, 11, 0, 0, 0, time.UTC)
@@ -70,7 +72,7 @@ func TestPersistJourneyStateActivity(t *testing.T) {
 			var ts testsuite.WorkflowTestSuite
 			env := ts.NewTestActivityEnvironment()
 			fake := &fakeJourneyRepo{upsertErr: tt.repoErr}
-			acts := NewActivities(fake)
+			acts := NewActivities(fake, nil, nil, nil)
 			env.RegisterActivity(acts.PersistJourneyState)
 
 			_, err := env.ExecuteActivity(acts.PersistJourneyState, tt.journey)

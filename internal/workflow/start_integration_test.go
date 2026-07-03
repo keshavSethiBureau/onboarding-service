@@ -8,15 +8,17 @@ import (
 	"github.com/Bureau-Inc/bureau-commons-go/metricx"
 	mongoclient "github.com/Bureau-Inc/bureau-commons-go/mongoclient"
 	mongoconfig "github.com/Bureau-Inc/bureau-commons-go/mongoclient/config"
+	enums "go.temporal.io/api/enums/v1"
+	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/sdk/worker"
 
-	"github.com/bureau/onboarding-service/internal/repo"
-	mongorepo "github.com/bureau/onboarding-service/internal/repo/mongo"
+	"onboarding-service/internal/repo"
+	mongorepo "onboarding-service/internal/repo/mongo"
 )
 
-// mongoJourneyRepo builds a Mongo-backed journey repo against a local Mongo,
-// skipping when none is reachable. Used to prove the end-to-end read-model write.
-func mongoJourneyRepo(t *testing.T) *mongorepo.OnboardingJourneyRepo {
+// mongoRepos builds Mongo-backed journey + provisioning repos, skipping when no
+// local Mongo is reachable.
+func mongoRepos(t *testing.T) (*mongorepo.OnboardingJourneyRepo, *mongorepo.ProvisioningRecordRepo) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -29,88 +31,130 @@ func mongoJourneyRepo(t *testing.T) *mongorepo.OnboardingJourneyRepo {
 		t.Skipf("no MongoDB reachable (%v); skipping workflow e2e test", err)
 	}
 	t.Cleanup(func() { _ = client.GetDatabase().Drop(context.Background()) })
-	return mongorepo.NewOnboardingJourneyRepo(client)
+	return mongorepo.NewOnboardingJourneyRepo(client), mongorepo.NewProvisioningRecordRepo(client)
 }
 
-// TestEmailVerified_StartsWorkflowAndWritesReadModel drives the real path:
-// a worker runs the workflow + PersistJourneyState against a real Temporal and
-// Mongo. A first EMAIL_VERIFIED must start the workflow and write the journey
-// read-model with currentStep = EMAIL_VERIFIED; a second EMAIL_VERIFIED for the
-// same user must NOT create a second workflow or journey (idempotent start).
-func TestEmailVerified_StartsWorkflowAndWritesReadModel(t *testing.T) {
+// e2eActivities wires Activities with real Mongo repos + in-test fakes for the
+// external ports (Auth0/provisioners aren't reachable from tests).
+func e2eActivities(journeys *mongorepo.OnboardingJourneyRepo, prov *mongorepo.ProvisioningRecordRepo) *Activities {
+	return NewActivities(journeys, prov, &countingOrgCreator{}, &countingProvisioner{})
+}
+
+// driveAllSignals sends every signal the v1 walk needs (buffered by Temporal
+// until each step consumes it), then returns.
+func driveAllSignals(t *testing.T, starter *Starter, client interface {
+	SignalWorkflow(ctx context.Context, workflowID, runID, signalName string, arg interface{}) error
+}, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := starter.SubmitStep(ctx, userID, "", StepEmailVerified); err != nil {
+		t.Fatalf("EMAIL_VERIFIED: %v", err)
+	}
+	if _, err := starter.RequestOrganisation(ctx, userID, "Acme Inc"); err != nil {
+		t.Fatalf("ORGANISATION_CREATED: %v", err)
+	}
+	_ = client.SignalWorkflow(ctx, userID, "", StepVerticalSelected, SignalPayload{VerticalName: "KYC"})
+	_ = client.SignalWorkflow(ctx, userID, "", StepQuestionnaireViewed, SignalPayload{})
+	if _, err := starter.RequestComplete(ctx, userID); err != nil {
+		t.Fatalf("ONBOARDING_COMPLETED: %v", err)
+	}
+}
+
+// TestExecutor_FullWalk_EndToEnd drives a v1 journey through every step on a real
+// Temporal + Mongo and asserts it ends at RESOURCES_PROVISIONED (completed) with
+// all provisioning recorded.
+func TestExecutor_FullWalk_EndToEnd(t *testing.T) {
 	client := dialTemporal(t)
 	defer client.Close()
-	journeys := mongoJourneyRepo(t)
+	journeys, prov := mongoRepos(t)
 
 	w := worker.New(client, TaskQueue, worker.Options{})
-	Register(w, NewActivities(journeys))
+	Register(w, e2eActivities(journeys, prov))
 	if err := w.Start(); err != nil {
 		t.Fatalf("start worker: %v", err)
 	}
 	defer w.Stop()
 
 	starter := NewStarter(client, TaskQueue)
-	ctx := context.Background()
-	userID := uniqueUserID("wf-e2e")
+	userID := uniqueUserID("walk-e2e")
+	orgID := "org_" + userID
 	t.Cleanup(func() { _ = client.TerminateWorkflow(context.Background(), userID, "", "test cleanup") })
 
-	// First EMAIL_VERIFIED -> starts the workflow.
-	run1, err := starter.SubmitStep(ctx, userID, "org-1", StepEmailVerified)
-	if err != nil {
-		t.Fatalf("first SubmitStep: %v", err)
+	driveAllSignals(t, starter, client, userID)
+
+	// Block until the workflow itself completes — the only reliable terminal
+	// signal (the read-model is written mid-step, so polling it can observe the
+	// terminal step before the final action has run).
+	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.GetWorkflow(waitCtx, userID, "").Get(waitCtx, nil); err != nil {
+		t.Fatalf("workflow did not complete cleanly: %v", err)
 	}
 
-	// The worker processes the signal and PersistJourneyState writes the read-model.
-	doc := waitForJourney(t, journeys, userID)
-	if doc.CurrentStep != StepEmailVerified {
-		t.Errorf("currentStep = %q, want EMAIL_VERIFIED", doc.CurrentStep)
-	}
-	if doc.Status != "in_progress" {
-		t.Errorf("status = %q, want in_progress", doc.Status)
-	}
-	if doc.StepCatalogVersion != CatalogVersion {
-		t.Errorf("stepCatalogVersion = %d, want %d (pinned)", doc.StepCatalogVersion, CatalogVersion)
-	}
-	if len(doc.Steps) != 1 {
-		t.Errorf("step summary = %d entries, want 1", len(doc.Steps))
+	doc, _ := journeys.FindByUserID(context.Background(), userID)
+	if doc == nil || doc.CurrentStep != StepResourcesProvisioned || doc.Status != "completed" {
+		t.Fatalf("journey did not reach terminal completed state: %+v", doc)
 	}
 
-	// Second EMAIL_VERIFIED for the same user -> same workflow (no duplicate).
-	run2, err := starter.SubmitStep(ctx, userID, "org-1", StepEmailVerified)
-	if err != nil {
-		t.Fatalf("second SubmitStep: %v", err)
+	rec, _ := prov.GetByOrgID(context.Background(), orgID)
+	if rec == nil || rec.Status != repo.ProvisioningStatusCompleted {
+		t.Fatalf("provisioning record not completed: %+v", rec)
 	}
-	if run2 != run1 {
-		t.Fatalf("second EMAIL_VERIFIED started a new run (%q != %q); idempotent start violated", run2, run1)
-	}
-	// Give the re-delivered signal time to process, then assert still ONE journey,
-	// still a single de-duped step entry.
-	time.Sleep(500 * time.Millisecond)
-	got, err := journeys.FindByUserID(ctx, userID)
-	if err != nil || got == nil {
-		t.Fatalf("FindByUserID after second call: got=%v err=%v", got, err)
-	}
-	if len(got.Steps) != 1 {
-		t.Errorf("after duplicate EMAIL_VERIFIED, step summary = %d entries, want 1 (idempotent)", len(got.Steps))
-	}
-	if got.CurrentStep != StepEmailVerified {
-		t.Errorf("currentStep after duplicate = %q, want EMAIL_VERIFIED", got.CurrentStep)
+	for _, res := range []string{resourceKong, resourceAWS, resourceSvix, resourceLago} {
+		if _, ok := rec.Resources[res]; !ok {
+			t.Errorf("missing provisioned resource %q in %+v", res, rec.Resources)
+		}
 	}
 }
 
-func waitForJourney(t *testing.T, r *mongorepo.OnboardingJourneyRepo, userID string) *repo.OnboardingJourneyDoc {
-	t.Helper()
-	ctx := context.Background()
-	for i := 0; i < 50; i++ {
-		doc, err := r.FindByUserID(ctx, userID)
-		if err != nil {
-			t.Fatalf("FindByUserID: %v", err)
-		}
-		if doc != nil {
-			return doc
-		}
-		time.Sleep(200 * time.Millisecond)
+// TestExecutor_ReplayIsDeterministic runs a full journey, fetches its history,
+// and replays it with WorkflowReplayer. A clean replay proves the workflow is
+// deterministic and that a crash-and-replay resumes from history WITHOUT
+// re-running completed steps (Temporal feeds their recorded results).
+func TestExecutor_ReplayIsDeterministic(t *testing.T) {
+	client := dialTemporal(t)
+	defer client.Close()
+	journeys, prov := mongoRepos(t)
+
+	w := worker.New(client, TaskQueue, worker.Options{})
+	Register(w, e2eActivities(journeys, prov))
+	if err := w.Start(); err != nil {
+		t.Fatalf("start worker: %v", err)
 	}
-	t.Fatalf("journey read-model for %s was not written in time", userID)
-	return nil
+	defer w.Stop()
+
+	starter := NewStarter(client, TaskQueue)
+	userID := uniqueUserID("replay-e2e")
+	t.Cleanup(func() { _ = client.TerminateWorkflow(context.Background(), userID, "", "test cleanup") })
+
+	driveAllSignals(t, starter, client, userID)
+
+	// Wait for completion so the history is a full, terminal run.
+	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.GetWorkflow(waitCtx, userID, "").Get(waitCtx, nil); err != nil {
+		t.Fatalf("workflow did not complete cleanly: %v", err)
+	}
+
+	// Collect the full history.
+	ctx := context.Background()
+	iter := client.GetWorkflowHistory(ctx, userID, "", false, enums.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
+	hist := &historypb.History{}
+	for iter.HasNext() {
+		e, err := iter.Next()
+		if err != nil {
+			t.Fatalf("history next: %v", err)
+		}
+		hist.Events = append(hist.Events, e)
+	}
+	if len(hist.Events) == 0 {
+		t.Fatal("empty history")
+	}
+
+	// Replay against the current workflow code — errors on any non-determinism.
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(OnboardingWorkflow)
+	if err := replayer.ReplayWorkflowHistory(nil, hist); err != nil {
+		t.Fatalf("replay was non-deterministic / failed to resume: %v", err)
+	}
 }
