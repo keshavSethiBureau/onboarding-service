@@ -129,8 +129,11 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			journey.CompletedAt = &now
 		}
 
-		// 5. Emit analytics step-event (its own activity/retry).
-		_ = workflow.ExecuteActivity(ctx, emitActivity, StepEvent{UserID: journey.UserID, Step: step.Name}).Get(ctx, nil)
+		// 5. Emit analytics step-event (its own activity/retry). Timestamp is
+		// workflow.Now so it is deterministic on replay.
+		_ = workflow.ExecuteActivity(ctx, emitActivity, StepEvent{
+			UserID: journey.UserID, OrgID: orgID, Step: step.Name, Timestamp: now,
+		}).Get(ctx, nil)
 	}
 
 	// Final persist: last step completed + terminal status.

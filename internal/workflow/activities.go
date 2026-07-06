@@ -17,9 +17,12 @@ type Activities struct {
 	provisioning repo.ProvisioningRecordRepo
 	orgCreator   auth0.OrgCreator
 	provisioner  provisioning.Provisioner
+	stepEvents   StepEventSink
 }
 
-// NewActivities wires the activities with their dependencies.
+// NewActivities wires the activities with their dependencies. Step events go
+// to the log-only sink until an analytics transport is chosen; override with
+// WithStepEventSink.
 func NewActivities(
 	journeys repo.OnboardingJourneyRepo,
 	provisioningRepo repo.ProvisioningRecordRepo,
@@ -31,7 +34,14 @@ func NewActivities(
 		provisioning: provisioningRepo,
 		orgCreator:   orgCreator,
 		provisioner:  provisioner,
+		stepEvents:   LogStepEventSink{},
 	}
+}
+
+// WithStepEventSink swaps the analytics sink (tests, future real transport).
+func (a *Activities) WithStepEventSink(s StepEventSink) *Activities {
+	a.stepEvents = s
+	return a
 }
 
 // ActionInput is the UNIFORM argument to every catalog action, so the executor
@@ -52,22 +62,17 @@ type ActionResult struct {
 	Email string `json:"email"`
 }
 
-// StepEvent is the analytics event emitted per step transition.
-type StepEvent struct {
-	UserID string `json:"userId"`
-	Step   string `json:"step"`
-}
-
 // PersistJourneyState upserts the denormalised journey read-model (LLD §5),
 // idempotent by userId.
 func (a *Activities) PersistJourneyState(ctx context.Context, journey dto.OnboardingJourney) error {
 	return a.journeys.Upsert(ctx, adapters.ToRepoOnboardingJourney(&journey))
 }
 
-// EmitStepEvent emits the analytics step-event (its own activity, its own retry).
-func (a *Activities) EmitStepEvent(_ context.Context, evt StepEvent) error {
-	log.Printf("analytics: step-event user=%s step=%s", evt.UserID, evt.Step)
-	return nil
+// EmitStepEvent forwards the analytics step-event to the configured sink (its
+// own activity, its own retry — a sink failure is retried without re-running
+// the step's action).
+func (a *Activities) EmitStepEvent(ctx context.Context, evt StepEvent) error {
+	return a.stepEvents.Emit(ctx, evt)
 }
 
 // CreateOrganisation creates (or returns the existing) Auth0 org for the user and
