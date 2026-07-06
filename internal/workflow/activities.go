@@ -42,12 +42,14 @@ type ActionInput struct {
 	OrgID       string `json:"orgId"`
 	DisplayName string `json:"displayName"`
 	TncAccepted string `json:"tncAccepted"`
+	Email       string `json:"email"`
 }
 
 // ActionResult is the UNIFORM result. The executor merges any non-empty field
 // back into the journey context (generic — not keyed to a specific step).
 type ActionResult struct {
 	OrgID string `json:"orgId"`
+	Email string `json:"email"`
 }
 
 // StepEvent is the analytics event emitted per step transition.
@@ -87,7 +89,14 @@ func (a *Activities) CreateOrganisation(ctx context.Context, in ActionInput) (Ac
 	if err := a.journeys.SetOrgID(ctx, in.UserID, orgID); err != nil {
 		return ActionResult{}, err
 	}
-	return ActionResult{OrgID: orgID}, nil
+	// Fetch the user's email from Auth0 (as the auth service does) so later steps
+	// (Lago billing) can thread it. Best-effort: a lookup failure must not fail
+	// org creation — Lago tolerates an empty email.
+	email, err := a.orgCreator.UserEmail(ctx, in.UserID)
+	if err != nil {
+		log.Printf("CreateOrganisation: user email lookup failed for %s: %v", in.UserID, err)
+	}
+	return ActionResult{OrgID: orgID, Email: email}, nil
 }
 
 // ProvisionKong creates the API-gateway consumer for the org.
@@ -139,7 +148,7 @@ func (a *Activities) provision(
 	ctx context.Context,
 	in ActionInput,
 	resource string,
-	fn func(ctx context.Context, orgID, orgName string) (string, error),
+	fn func(ctx context.Context, in provisioning.ProvisionInput) (string, error),
 ) (ActionResult, error) {
 	rec, err := a.provisioning.GetByOrgID(ctx, in.OrgID)
 	if err != nil {
@@ -154,7 +163,9 @@ func (a *Activities) provision(
 	if _, done := rec.Resources[resource]; done {
 		return ActionResult{}, nil // already provisioned — idempotent
 	}
-	resourceID, err := fn(ctx, in.OrgID, in.OrgID)
+	resourceID, err := fn(ctx, provisioning.ProvisionInput{
+		OrgID: in.OrgID, DisplayName: in.DisplayName, Email: in.Email,
+	})
 	if err != nil {
 		return ActionResult{}, err
 	}

@@ -30,4 +30,7 @@ type CreateOrgInput struct {
 // HTTPOrgCreator is the production implementation; tests use their own fakes.
 type OrgCreator interface {
 	CreateOrganisation(ctx context.Context, in CreateOrgInput) (orgID string, err error)
+	// UserEmail returns the user's email from Auth0 (auth service reads it via
+	// users.get for downstream billing). Used to populate the Lago customer.
+	UserEmail(ctx context.Context, userID string) (email string, err error)
 }

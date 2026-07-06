@@ -27,6 +27,9 @@ type awsGateway struct {
 
 // newAWSGateway builds the real gateway from ambient AWS config for the region.
 func newAWSGateway(ctx context.Context, region, usagePlanID string) (*awsGateway, error) {
+	if region == "" {
+		region = "ap-south-1" // auth service default
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
@@ -38,9 +41,10 @@ func newAWSGateway(ctx context.Context, region, usagePlanID string) (*awsGateway
 // means it already exists) and attaches it to the basic usage plan.
 func (g *awsGateway) ensureAPIKey(ctx context.Context, orgID, orgName string) (string, error) {
 	out, err := g.client.CreateApiKey(ctx, &apigateway.CreateApiKeyInput{
-		Name:       aws.String(orgID),
-		CustomerId: aws.String(orgID),
-		Enabled:    true,
+		Name:        aws.String(orgID),
+		Description: aws.String("[Do not delete] api key for the organisation" + orgName),
+		Enabled:     true,
+		Value:       aws.String(orgID + "_key_svc_random"),
 	})
 	if err != nil {
 		var conflict *agtypes.ConflictException

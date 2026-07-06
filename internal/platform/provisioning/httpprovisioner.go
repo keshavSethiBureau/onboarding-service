@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/google/uuid"
 
 	hc "github.com/Bureau-Inc/bureau-commons-go/httpclient"
 	httpconfig "github.com/Bureau-Inc/bureau-commons-go/httpclient/config"
@@ -18,16 +21,35 @@ const (
 	svcLago = "lago"
 	svcKong = "kong"
 
-	apiCreateApp      = "createApp"
-	apiCreateCustomer = "createCustomer"
-	apiCreateConsumer = "createConsumer"
+	apiCreateApp          = "createApp"
+	apiCreateCustomer     = "createCustomer"
+	apiCreatePlan         = "createPlan"
+	apiCreateSubscription = "createSubscription"
+	apiCreateConsumer     = "createConsumer"
 )
+
+// Lago provisioning defaults (mirror the auth service's create-lago-customer-plans).
+const (
+	lagoCurrency    = "INR"
+	lagoLegalNumber = "POC"
+	lagoCountry     = "IN"
+	lagoInterval    = "monthly"
+)
+
+// lagoEnvironments are the three per-environment plan/subscription pairs the auth
+// service creates for every customer (plan code prefix + subscription name).
+var lagoEnvironments = []struct{ CodePrefix, SubName string }{
+	{"d_c_plan_", "Dev"},
+	{"s_c_plan_", "Stg"},
+	{"p_c_plan_", "Prod"},
+}
 
 // Settings configures the real provisioner's HTTP integrations + AWS.
 type Settings struct {
 	SvixBaseURL, SvixToken string
 	LagoBaseURL, LagoToken string
-	KongBaseURL            string
+	KongBaseURL, KongToken string
+	Environment            string // tenancy tag on Kong consumers (Auth: ENVIRONMENT_KEY)
 	AWSRegion              string
 	AWSUsagePlanID         string
 }
@@ -69,7 +91,9 @@ func buildHTTPClient(s Settings, registry *metricx.Registry) (*hc.BureauHttpClie
 				apiCreateApp: {Path: "/api/v1/app/", Method: "POST"},
 			}},
 			svcLago: {BaseURL: s.LagoBaseURL, ApiConfigs: map[string]httpconfig.ApiConfig{
-				apiCreateCustomer: {Path: "/api/v1/customers", Method: "POST"},
+				apiCreateCustomer:     {Path: "/api/v1/customers", Method: "POST"},
+				apiCreatePlan:         {Path: "/api/v1/plans", Method: "POST"},
+				apiCreateSubscription: {Path: "/api/v1/subscriptions", Method: "POST"},
 			}},
 			svcKong: {BaseURL: s.KongBaseURL, ApiConfigs: map[string]httpconfig.ApiConfig{
 				apiCreateConsumer: {Path: "/consumers", Method: "POST"},
@@ -83,38 +107,106 @@ func buildHTTPClient(s Settings, registry *metricx.Registry) (*hc.BureauHttpClie
 	return client, nil
 }
 
-// Kong creates the API-gateway consumer (username = orgId).
-func (p *HTTPProvisioner) Kong(ctx context.Context, orgID, orgName string) (string, error) {
-	body := map[string]any{"username": orgID, "custom_id": orgID, "tags": []string{orgName}}
-	if err := p.post(ctx, svcKong, apiCreateConsumer, nil, body); err != nil {
+// Kong creates the API-gateway consumer (username = orgId), tagged with the
+// display name + environment, authenticated with the Kong admin token.
+func (p *HTTPProvisioner) Kong(ctx context.Context, in ProvisionInput) (string, error) {
+	body := map[string]any{
+		"username":  in.OrgID,
+		"custom_id": in.OrgID,
+		"tags":      []string{in.DisplayName, p.cfg.Environment},
+	}
+	headers := map[string]string{"Authorization": "Bearer " + p.cfg.KongToken}
+	if err := p.post(ctx, svcKong, apiCreateConsumer, headers, body); err != nil {
 		return "", err
 	}
-	return orgID, nil
+	return in.OrgID, nil
 }
 
-// Svix registers the webhook application (uid = orgId).
-func (p *HTTPProvisioner) Svix(ctx context.Context, orgID, orgName string) (string, error) {
-	body := map[string]any{"uid": orgID, "name": orgName, "rateLimit": 100}
+// Svix registers the webhook application (uid = orgId, name = display name).
+func (p *HTTPProvisioner) Svix(ctx context.Context, in ProvisionInput) (string, error) {
+	body := map[string]any{"uid": in.OrgID, "name": in.DisplayName, "rateLimit": 100}
 	headers := map[string]string{"Authorization": "Bearer " + p.cfg.SvixToken}
 	if err := p.post(ctx, svcSvix, apiCreateApp, headers, body); err != nil {
 		return "", err
 	}
-	return orgID, nil
+	return in.OrgID, nil
 }
 
-// Lago creates the billing customer (external_id = orgId).
-func (p *HTTPProvisioner) Lago(ctx context.Context, orgID, orgName string) (string, error) {
-	body := map[string]any{"customer": map[string]any{"external_id": orgID, "name": orgName}}
+// Lago provisions billing exactly as the auth service does: a fully-configured
+// customer (Stripe billing), three per-environment plans, and three
+// subscriptions. Each call is idempotent (409 => already exists).
+func (p *HTTPProvisioner) Lago(ctx context.Context, in ProvisionInput) (string, error) {
 	headers := map[string]string{"Authorization": "Bearer " + p.cfg.LagoToken}
-	if err := p.post(ctx, svcLago, apiCreateCustomer, headers, body); err != nil {
+
+	// 1. Customer.
+	customer := map[string]any{
+		"external_id":  in.OrgID,
+		"name":         in.DisplayName,
+		"legal_name":   in.DisplayName,
+		"legal_number": lagoLegalNumber,
+		"currency":     lagoCurrency,
+		"email":        in.Email,
+		"country":      lagoCountry,
+		"metadata":     []map[string]any{{"key": "type", "value": "automated_billing"}},
+		"billing_configuration": map[string]any{
+			"invoice_grace_period":     0,
+			"payment_provider":         "stripe",
+			"sync":                     true,
+			"sync_with_provider":       true,
+			"provider_payment_methods": []string{"card"},
+		},
+	}
+	if err := p.post(ctx, svcLago, apiCreateCustomer, headers, map[string]any{"customer": customer}); err != nil {
 		return "", err
 	}
-	return orgID, nil
+
+	// 2. Three plans (one per environment).
+	for _, env := range lagoEnvironments {
+		code := env.CodePrefix + in.OrgID
+		plan := map[string]any{
+			"name":            in.DisplayName,
+			"code":            code,
+			"amount_cents":    0,
+			"amount_currency": lagoCurrency,
+			"trial_period":    0,
+			"interval":        lagoInterval,
+			"pay_in_advance":  false,
+			"description":     "Plan for " + in.DisplayName,
+		}
+		if err := p.post(ctx, svcLago, apiCreatePlan, headers, map[string]any{"plan": plan}); err != nil {
+			return "", err
+		}
+	}
+
+	// 3. Three subscriptions (anniversary billing from the 2nd of this month).
+	subAt := secondOfMonthUTC()
+	for _, env := range lagoEnvironments {
+		sub := map[string]any{
+			"external_customer_id": in.OrgID,
+			"plan_code":            env.CodePrefix + in.OrgID,
+			"external_id":          uuid.NewString(),
+			"name":                 env.SubName,
+			"subscription_date":    subAt,
+			"billing_time":         "anniversary",
+		}
+		if err := p.post(ctx, svcLago, apiCreateSubscription, headers, map[string]any{"subscription": sub}); err != nil {
+			return "", err
+		}
+	}
+
+	return in.OrgID, nil
+}
+
+// secondOfMonthUTC returns the 2nd day of the current month at 00:00:00 UTC in
+// RFC3339 (matches the auth service's subscription_date).
+func secondOfMonthUTC() string {
+	now := time.Now().UTC()
+	return time.Date(now.Year(), now.Month(), 2, 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
 }
 
 // AWS creates the API key + attaches the basic usage plan via the AWS SDK.
-func (p *HTTPProvisioner) AWS(ctx context.Context, orgID, orgName string) (string, error) {
-	return p.aws.ensureAPIKey(ctx, orgID, orgName)
+func (p *HTTPProvisioner) AWS(ctx context.Context, in ProvisionInput) (string, error) {
+	return p.aws.ensureAPIKey(ctx, in.OrgID, in.DisplayName)
 }
 
 // post executes a POST and treats HTTP 409 (already exists) as idempotent success.

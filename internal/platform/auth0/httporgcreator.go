@@ -22,6 +22,7 @@ const (
 	apiToken      = "getToken"
 	apiCreateOrg  = "createOrg"
 	apiUserOrgs   = "getUserOrgs"
+	apiGetUser    = "getUser"
 	apiAddMembers = "addMembers"
 	apiAddRoles   = "addMemberRoles"
 	apiDeleteOrg  = "deleteOrg"
@@ -80,6 +81,7 @@ func NewHTTPOrgCreator(s Auth0Settings, registry *metricx.Registry) (*HTTPOrgCre
 				apiToken:      {Path: "/oauth/token", Method: "POST"},
 				apiCreateOrg:  {Path: "/api/v2/organizations", Method: "POST"},
 				apiUserOrgs:   {Path: "/api/v2/users/{id}/organizations", Method: "GET"},
+				apiGetUser:    {Path: "/api/v2/users/{id}", Method: "GET"},
 				apiAddMembers: {Path: "/api/v2/organizations/{id}/members", Method: "POST"},
 				apiAddRoles:   {Path: "/api/v2/organizations/{id}/members/{userId}/roles", Method: "POST"},
 				apiDeleteOrg:  {Path: "/api/v2/organizations/{id}", Method: "DELETE"},
@@ -190,6 +192,28 @@ func (c *HTTPOrgCreator) userOwnsOrg(ctx context.Context, auth map[string]string
 		return false, fmt.Errorf("check user organisations: %w", err)
 	}
 	return len(orgs) > 0, nil
+}
+
+type userResponse struct {
+	Email string `json:"email"`
+}
+
+// UserEmail fetches the user's email from Auth0 (GET /api/v2/users/{id}),
+// mirroring the auth service's users.get lookup used for billing.
+func (c *HTTPOrgCreator) UserEmail(ctx context.Context, userID string) (string, error) {
+	token, err := c.ensureToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	var user userResponse
+	if err := c.http.ExecuteWithContext(ctx, &dtos.ApiRequest{
+		ServiceName: svcAuth0, ApiName: apiGetUser,
+		Headers:    map[string]string{"Authorization": "Bearer " + token},
+		PathParams: map[string]string{"id": userID},
+	}, &user); err != nil {
+		return "", fmt.Errorf("get user: %w", err)
+	}
+	return user.Email, nil
 }
 
 // ensureToken returns a cached M2M token, fetching a new one when absent/expired.

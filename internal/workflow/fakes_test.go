@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"onboarding-service/internal/platform/auth0"
+	"onboarding-service/internal/platform/provisioning"
 	"onboarding-service/internal/repo"
 )
 
@@ -76,23 +77,26 @@ func (c *countingOrgCreator) CreateOrganisation(_ context.Context, in auth0.Crea
 	c.calls++
 	return "org_" + in.UserID, nil
 }
+func (c *countingOrgCreator) UserEmail(_ context.Context, userID string) (string, error) {
+	return userID + "@example.com", nil
+}
 
 // countingProvisioner records how many times each provisioning action runs.
 type countingProvisioner struct{ kong, svix, lago, aws int }
 
-func (c *countingProvisioner) Kong(_ context.Context, orgID, _ string) (string, error) {
+func (c *countingProvisioner) Kong(_ context.Context, in provisioning.ProvisionInput) (string, error) {
 	c.kong++
-	return "kong_" + orgID, nil
+	return "kong_" + in.OrgID, nil
 }
-func (c *countingProvisioner) Svix(_ context.Context, orgID, _ string) (string, error) {
+func (c *countingProvisioner) Svix(_ context.Context, in provisioning.ProvisionInput) (string, error) {
 	c.svix++
-	return "svix_" + orgID, nil
+	return "svix_" + in.OrgID, nil
 }
-func (c *countingProvisioner) Lago(_ context.Context, orgID, _ string) (string, error) {
+func (c *countingProvisioner) Lago(_ context.Context, in provisioning.ProvisionInput) (string, error) {
 	c.lago++
-	return "lago_" + orgID, nil
+	return "lago_" + in.OrgID, nil
 }
-func (c *countingProvisioner) AWS(_ context.Context, orgID, _ string) (string, error) {
+func (c *countingProvisioner) AWS(_ context.Context, in provisioning.ProvisionInput) (string, error) {
 	c.aws++
-	return "aws_" + orgID, nil
+	return "aws_" + in.OrgID, nil
 }

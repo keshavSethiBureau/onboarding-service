@@ -78,6 +78,7 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 	orgID := ""
 	displayName := ""
 	tncAccepted := ""
+	email := ""
 
 	for _, step := range CatalogSteps(version) {
 		// 1. Persist where the user is (drives the resume screen while awaiting a signal).
@@ -105,13 +106,16 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		if step.Action != "" {
 			var res ActionResult
 			if err := workflow.ExecuteActivity(ctx, step.Action, ActionInput{
-				UserID: journey.UserID, OrgID: orgID, DisplayName: displayName, TncAccepted: tncAccepted,
+				UserID: journey.UserID, OrgID: orgID, DisplayName: displayName, TncAccepted: tncAccepted, Email: email,
 			}).Get(ctx, &res); err != nil {
 				return err
 			}
 			if res.OrgID != "" {
 				orgID = res.OrgID
 				journey.OrgID = orgID
+			}
+			if res.Email != "" {
+				email = res.Email
 			}
 		}
 

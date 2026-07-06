@@ -37,7 +37,7 @@ internal:
 provisioning:
   svix: { baseUrl: "", token: "" }
   lago: { baseUrl: "", token: "" }
-  kong: { baseUrl: "" }
+  kong: { baseUrl: "", token: "" }
   aws: { region: "", usagePlanId: "" }
 
 # Apollo config client (bureau-commons-go/configlib). Empty metaAddr => the

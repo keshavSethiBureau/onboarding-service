@@ -28,18 +28,21 @@ internal:
   authToken: ${INTERNAL_AUTH_TOKEN:}
 
 # Post-org provisioning (real Svix/Lago/Kong via httpclient + AWS via SDK when set).
+# Env var names match the auth service (overwatch-authentication-service) so the
+# same secrets configure both services.
 provisioning:
   svix:
-    baseUrl: ${SVIX_BASE_URL:}
-    token: ${SVIX_API_TOKEN:}
+    baseUrl: ${AUTHENTICATION_SVC_SVIX_DOMAIN:}
+    token: ${SVIX_API_KEY:}
   lago:
-    baseUrl: ${LAGO_BASE_URL:}
-    token: ${LAGO_API_TOKEN:}
+    baseUrl: ${GET_LAGO_URL:}
+    token: ${AUTHENTICATION_GET_HOSTED_LAGO_KEY:}
   kong:
-    baseUrl: ${KONG_ADMIN_URL:}
+    baseUrl: ${KONG_URL:}
+    token: ${KONG_PAT:}
   aws:
-    region: ${AWS_REGION:ap-south-1}
-    usagePlanId: ${AWS_BASIC_USAGE_PLAN_ID:}
+    region: ${AUTHENTICATION_SVC_AWS_REGION:ap-south-1}
+    usagePlanId: ${AUTHENTICATION_SVC_API_GATEWAY_USAGE_PLAN_BASIC_PLAN_ID:}
 
 # Shared dev Apollo (see agent_docs / deployments/apollo README)
 apollo:

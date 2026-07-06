@@ -135,7 +135,8 @@ func Wire() (*Container, error) {
 	provisioner, err := provisioning.NewHTTPProvisioner(mongoCtx, provisioning.Settings{
 		SvixBaseURL: cfg.Provisioning.Svix.BaseURL, SvixToken: cfg.Provisioning.Svix.Token,
 		LagoBaseURL: cfg.Provisioning.Lago.BaseURL, LagoToken: cfg.Provisioning.Lago.Token,
-		KongBaseURL:    cfg.Provisioning.Kong.BaseURL,
+		KongBaseURL: cfg.Provisioning.Kong.BaseURL, KongToken: cfg.Provisioning.Kong.Token,
+		Environment:    cfg.Environment,
 		AWSRegion:      cfg.Provisioning.AWS.Region,
 		AWSUsagePlanID: cfg.Provisioning.AWS.UsagePlanID,
 	}, registry)
