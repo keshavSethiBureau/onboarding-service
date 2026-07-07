@@ -1,10 +1,16 @@
 # Onboarding Service
 
-Go service that owns everything from email verification onward: organisation
-creation (by calling Auth0), onboarding orchestration, vertical selection,
-questions-per-vertical mapping, and all post-org-creation provisioning (Svix, Lago,
-and other setup migrated from the Auth Service). The Authentication Service keeps
-signup, login, Auth0 login/token management, and email verification only.
+Go service that owns the onboarding journey from login onward. The frontend
+authenticates directly with Auth0 (SDK / Universal Login — never proxied through a
+backend); it then calls its existing /me on the Auth Service (unchanged). Two journey
+entry points: at SIGNUP the frontend calls POST /v1/onboarding/signup here (which
+calls Auth's /me once to get fresh claims and starts the journey atomically); at
+every later LOGIN the frontend calls GET /v1/onboarding/state with the JWT (no proxy
+of login /me). This service owns: journey start (LOGGED_IN), email-verification tracking
+(from the JWT email_verified claim), organisation creation (Auth0 Management API),
+vertical selection, questionnaire display, and all post-org provisioning (Svix,
+Lago, and other migrated setup). The Authentication Service is NOT in the
+onboarding path — no calls in either direction.
 
 Org-creation migration: the frontend's org-creation call moves from the Auth Service
 to `POST /v1/onboarding/organisation` on this service (which calls Auth0). Hard
@@ -78,13 +84,22 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 ## Collections (Mongo, own DB)
 - `onboarding_journeys`   — unique index (userId); denormalised read-model with embedded Steps
 - `provisioning_records`  — unique index (orgId); Svix + Lago status
+- `step_catalogs`         — unique index (version); INSERT-ONLY, versions immutable;
+                            preloaded into local cache at startup, reads are cache-only
 (No onboarding_steps collection — step detail is embedded on the journey; analytics via emitted events.)
 
 ## Hard rules
 - Identity (userId, orgId) is read from the Auth0 token, never from request bodies.
-- `/v1/internal/*` endpoints are callable only by the Auth Service (internal network); never public.
-- Onboarding is a Temporal workflow (WorkflowID = userId). The Auth Service's ONLY
-  call is the internal step signalling EMAIL_VERIFIED, which starts the workflow.
+- There are NO internal endpoints for the Auth Service — it never calls this service.
+- Onboarding is a Temporal workflow (WorkflowID = userId), started by the first
+  GET /v1/onboarding/state call (LOGGED_IN). That endpoint is idempotent: called on
+  every login forever; start-if-absent and already-completed-step signals are no-ops.
+  It reads email_verified from the JWT and signals EMAIL_VERIFIED when true (frontend
+  refreshes the token after the user verifies). /me stays in the Auth Service,
+  untouched — never reimplement or migrate its logic here.
+- Signup entry (POST /v1/onboarding/signup) is the ONLY call from this service to Auth
+  (calls /me once to start the journey). It must be idempotent and retry-safe; if Auth
+  is down, retry, and the login /state entry is the fallback. Login /me is NEVER proxied.
 - Org creation is owned by THIS service: `POST /v1/onboarding/organisation` calls
   Auth0 to create the org (idempotent CreateOrganisation activity), records
   ORGANISATION_CREATED, then runs the migrated post-org setup activities.
@@ -99,12 +114,28 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 - Verticals/questions are read-only at runtime from the in-memory cache, sourced from Apollo
   (`configlib`) with hot-reload. No custom refresh endpoint.
 - Every handler, activity, and Mongo call is traced (telemetry) and measured (metricx).
+- Step catalog lives in `step_catalogs` (Mongo), preloaded to a per-instance cache at
+  startup; reads are cache-only. NEVER modify an existing version — a step change is a
+  NEW version document. Latest = max(version), NEVER a document count. Cached versions
+  are never re-read. Creating a version: max(version)+1, retry on unique-index conflict.
+- The workflow is a GENERIC EXECUTOR: it reads the steps for the journey's pinned
+  StepCatalogVersion and walks them, dispatching each step's action by name. No
+  hardcoded `if step == X` branches. Keep granular activities (one per side effect) —
+  never a single mega-activity (it would re-run succeeded work on any retry).
+- Workflow code MUST be deterministic: no time.Now, random, direct DB/HTTP, or
+  map-iteration-order dependence; use Temporal's replay-aware logger inside workflows,
+  never a direct logger. Emit metrics from activities/interceptors, not workflow code.
+- Metric labels are low-cardinality only (step, action, route, status) — NEVER userId
+  or orgId as labels (those belong in logs).
+- At startup, validate every catalog action has a registered activity handler; fail
+  readiness otherwise (a new catalog version's handlers must ship in the same deploy).
 
 ## Boundaries (do not touch)
 - Do not add answer-storage for the questionnaire (out of scope; only question->vertical mapping).
 - Do not add template recommendations (future scope).
 - Do not put verticals or questions in Mongo.
 - Do not add an onboarding_steps or user_verticals collection (embedded on the journey).
+- Do not update or delete an existing step_catalogs version; do not derive latest from a count.
 
 ## Style
 - Return typed errors via a shared error helper; map to HTTP status in the controller layer.

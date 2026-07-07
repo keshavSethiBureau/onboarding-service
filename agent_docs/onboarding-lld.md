@@ -5,16 +5,37 @@
 
 ## 1. Purpose
 
-Owns everything from email verification onward: organisation creation (by calling
-Auth0), onboarding orchestration, vertical selection, questions-per-vertical
-display, and all post-org-creation resource provisioning (Svix, Lago, and other
-setup migrated from the Authentication Service). The Authentication Service keeps
-signup, login, Auth0 login/token management, and email verification only.
+Owns the entire onboarding journey from login onward. The frontend authenticates
+directly with Auth0 via SDK (Universal Login) — we do NOT proxy interactive
+login/signup through any backend. After Auth0 returns the JWT, the frontend calls
+its existing `/me` on the Auth Service (unchanged — no /me logic migrates here).
+There are two entry points into the journey:
+- **At signup:** the frontend calls `POST /v1/onboarding/signup` on this service,
+  which calls Auth's `/me` to obtain the fresh signup identity/claims and uses them
+  to start the journey — so the journey starts atomically at signup (see note below).
+- **At every later login:** the frontend calls `GET /v1/onboarding/state` with the
+  JWT (no proxying of the login `/me`).
+From there this service owns everything: journey start,
+email-verification tracking (read from the JWT's `email_verified` claim), organisation
+creation (calling Auth0's Management API), vertical selection, questionnaire display,
+and all post-org provisioning (Svix, Lago, and other migrated setup).
+
+The Authentication Service makes NO calls into this service. `/me` stays in Auth
+untouched (no logic migrates). The only call in the other direction is a single,
+signup-only call from this service to Auth's `/me`, used to start the journey.
+
+Atomic-start note: true cross-service transactionality is impossible (two systems,
+no shared commit), so "atomic" here means effectively-atomic-and-safely-retryable.
+The signup entry does (call /me) + (start workflow) together; because workflow start
+is idempotent (WorkflowID = userId) and the state endpoint is idempotent, a
+half-failed signup can be retried with no duplicate journey or corrupted state. If
+Auth is slow/down at signup, retry; worst case the frontend falls back to the normal
+`GET /v1/onboarding/state` entry point on the next authenticated call.
 
 Migration note: today the frontend calls the Authentication Service, which calls
 Auth0 to create the organisation and then runs post-creation setup. After this
-change the frontend calls the **Go service**, which calls Auth0 to create the org
-and runs all subsequent setup. Cutover is a single hard release (no dual-run).
+change the frontend calls this Go service for `/me` and org creation, which calls
+Auth0 and runs all setup. Cutover is a single hard release (no dual-run).
 
 In scope: org creation (via Auth0), onboarding orchestration + drop-off tracking,
 vertical selection, questions-per-vertical mapping (display only), migration of
@@ -62,8 +83,10 @@ recommendations, analytics dashboards, workflow versioning. (All future scope.)
 Current catalog (v1), in order:
 
 ```
-EMAIL_VERIFIED          // signalled by Auth Service (its last responsibility) -> starts workflow
-ORGANISATION_CREATED    // Go service calls Auth0 to create the org, then records this
+LOGGED_IN               // first GET /v1/onboarding/state with a valid JWT -> starts the workflow
+EMAIL_VERIFIED          // recorded when /v1/onboarding/state sees email_verified=true in the JWT
+                        // (frontend refreshes the token after the user clicks the link)
+ORGANISATION_CREATED    // Go service calls Auth0 Management API to create the org
 <MIGRATED_POST_ORG_STEPS>  // TBD: derived by reading the Auth Service's org-creation flow;
                            // the real post-creation setup steps that move into Go
 VERTICAL_SELECTED
@@ -102,7 +125,9 @@ to the first step they have not completed.
   each step retries/recovers independently. A single activity doing everything would
   re-run already-succeeded work on any failure and discard Temporal's core value.
 - **Workflow:** `OnboardingWorkflow`, one per user (WorkflowID = userId), started
-  when the first step signal arrives (EMAIL_VERIFIED).
+  by the first `GET /v1/onboarding/state` call (LOGGED_IN). This endpoint is
+  idempotent: it is called on every login forever, so start-if-absent must be a no-op
+  when the workflow exists, and signalling an already-completed step must be a no-op.
 - **Signals:** the Auth Service (and the frontend) advance the workflow by sending
   signals — e.g. `EmailVerified`, `OrganisationCreated`, `VerticalSelected`,
   `QuestionnaireViewed`, `Complete`. A step needing user input receives that input as
@@ -158,11 +183,52 @@ type ProvisioningRecord struct {
     CreatedAt         time.Time
     UpdatedAt         time.Time
 }
+
+// collection: step_catalogs ; unique index (version) ; INSERT-ONLY
+// One document per catalog version. A version's steps are immutable once created —
+// never updated or deleted. A step change = inserting a NEW version.
+type StepCatalog struct {
+    Version   int        // monotonically increasing; assigned as max(version)+1
+    Steps     []StepDef  // ordered list of steps for this version
+    CreatedAt time.Time
+}
+
+type StepDef struct {
+    Name   string  // step name recorded on the journey
+    Action string  // which activity handler runs for this step
+}
 ```
 
 Note: no `onboarding_steps` collection and no `user_verticals` collection — step
 detail is embedded on the journey (operational) and emitted as events (analytics);
 vertical lives on the journey.
+
+### 6.1a Step catalog storage, caching & versioning (Mongo-backed)
+
+- **Source of truth = `step_catalogs` in Mongo; runtime reads = local cache.** At
+  startup, ALL versions are preloaded into a per-instance in-memory cache and served
+  cache-only through the same lookup interface the workflow executor uses (executor
+  unchanged). Readiness fails if the cache did not load.
+- **Insert-only / immutable:** a version's steps never change once created. This is
+  what keeps Temporal replay deterministic — a given `StepCatalogVersion` always
+  resolves to the same ordered steps forever. Application logic rejects any attempt to
+  modify an existing version; the unique `version` index backs this.
+- **Cache-miss fallback:** a version inserted after startup is loaded once from Mongo
+  on first lookup and cached forever (safe because immutable). A cached version is
+  never re-read.
+- **Creating a version:** read `currentMax = max(version)` (NOT a document count —
+  count can diverge from max and must never derive a version number); insert with
+  `version = currentMax + 1`; if the unique index rejects it (concurrent creation),
+  re-read max and retry (bounded). Never update/delete an existing version.
+- **Latest for new journeys:** `LatestVersion() = max(version)` in the cache (never
+  count). New journeys pin `StepCatalogVersion = LatestVersion()` at workflow start;
+  the pin never changes for the journey's life. Because the cache is preloaded at
+  startup, a version inserted at runtime becomes "latest" only after instance restart —
+  intentional: a new version's steps need newly deployed activity handlers, so the
+  deploy that ships the handlers is what activates the version.
+- **Deploy-order safety:** at startup, after preloading, validate that every `action`
+  referenced by every catalog version has a registered activity handler; fail readiness
+  otherwise.
 
 ### 6.2 Apollo config + cache (not Mongo)
 
@@ -192,19 +258,22 @@ type Question struct {
 ```
 POST /v1/onboarding/organisation  frontend calls this to create the org (Go calls Auth0);
                                    starts the workflow and records ORGANISATION_CREATED
+POST /v1/onboarding/signup         SIGNUP ENTRY POINT. Calls Auth's /me for fresh
+                                    claims, starts the workflow (LOGGED_IN; EMAIL_VERIFIED
+                                    if already true), returns journey state. Idempotent.
+GET  /v1/onboarding/state          LOGIN ENTRY POINT + resume. Starts the workflow if
+                                    absent (LOGGED_IN); reads email_verified from the
+                                    JWT and signals EMAIL_VERIFIED when true; returns
+                                    { current_step, status }. Idempotent on every call.
 GET  /v1/verticals                 list active verticals (from cache)
-GET  /v1/onboarding/state          { current_step, status } from journey read-model
 POST /v1/onboarding/vertical       body { vertical_name }; signals VerticalSelected
 GET  /v1/onboarding/questionnaire  questions for the journey's vertical (from cache)
 POST /v1/onboarding/complete       signals Complete to the workflow
 ```
 
-### Internal (`/v1/internal`, Auth Service only, internal network)
-```
-POST /v1/internal/onboarding/steps  body { user_id, org_id, step_name }
-                                     Auth's ONLY call: signals EMAIL_VERIFIED, starting
-                                     the workflow. Everything after is owned by Go.
-```
+There are NO internal endpoints for the Authentication Service — it does not call
+this service, and /me stays in Auth unchanged. The journey starts and advances from
+`/v1/onboarding/state` (token claims) and the public endpoints below.
 
 The frontend's org-creation call moves from the Auth Service to
 `POST /v1/onboarding/organisation` on the Go service. Public write endpoints
@@ -215,14 +284,18 @@ hot-reload, not an endpoint.
 
 ### Returning user (resume)
 ```
-Auth0 login -> token { sub=userId, org_id }
-  -> GET /v1/onboarding/state
-  -> read journey read-model by userId -> return currentStep
+Auth0 login (frontend <-> Auth0 SDK) -> JWT { sub=userId, org_id, email_verified }
+  -> frontend calls /me on Auth (unchanged, existing logic)
+  -> frontend ALSO calls GET /v1/onboarding/state here (same JWT)
+  -> starts workflow if absent (LOGGED_IN); signals EMAIL_VERIFIED if claim true
+  -> returns currentStep from the journey read-model
   -> frontend routes to that step
 ```
-The read-model always exists by return time because the first internal step starts
-the workflow, whose PersistJourneyState activity writes the journey. If missing,
-return the first step.
+The read-model always exists by return time because the first state call starts the
+workflow, whose PersistJourneyState activity writes the journey. Note the claim
+staleness rule: the JWT issued at signup has email_verified=false; after the user
+clicks the verification link the frontend refreshes the token, and the next /me
+call advances the step.
 
 ### Provisioning (end of workflow)
 ```
@@ -268,18 +341,35 @@ half-completed under Auth is not double-created.
 - **Provisioning idempotency** — orgId idempotency key on Svix/Lago (and migrated
   setup) activities + unique orgId index; retries never double-provision.
 
+### Observability & abandonment
+- Metrics (Prometheus via metricx): funnel counter `onboarding_step_transitions_total{step,status}`,
+  workflow started/completed, `onboarding_activity_executions_total{action,status}` +
+  duration histogram, provisioning success/latency, RED per HTTP route. Low-cardinality
+  labels only — step/action/route/status, NEVER userId/orgId as labels (they go in logs).
+- Logs: structured, with userId/orgId/workflowId/step and the OTel trace id. Inside
+  workflow code use Temporal's replay-aware logger only (never a direct logger, which
+  breaks determinism); emit metrics from activities/interceptors, not workflow code.
+- Abandonment: journey status stays `in_progress` for a dropped user (no `abandoned`
+  status). "Abandoned" is derived by query (in_progress + stale UpdatedAt). Optionally
+  the workflow can race a `workflow.NewTimer` against the next signal via a Selector to
+  fire a reminder / mark stale after N days — optional, not V1-blocking.
+
 ## 11. Peripherals & infrastructure (bureau-commons-go)
 
 ### Wire at startup (foundation)
 - `configloader` — boot/infra config: Mongo URI, Auth0, Temporal address, ports.
 - `configlib` (Apollo) — verticals + questions; hot-reload into per-instance cache.
 - `mongoclient` — datastore singleton; create indexes at startup
-  (unique userId on onboarding_journeys; unique orgId on provisioning_records).
+  (unique userId on onboarding_journeys; unique orgId on provisioning_records;
+  unique version on step_catalogs).
 - `temporalclient` — Temporal workflow client + worker registration.
 - `telemetry` — OpenTelemetry global setup at boot.
 - `metricx` — Prometheus façade + `/metrics`.
+- Startup also: preload ALL step_catalogs versions into the local cache, and validate
+  every catalog action has a registered activity handler.
 - Health check — liveness (process up) + readiness (Mongo connected, Temporal
-  reachable, vertical cache warm).
+  reachable, vertical cache warm, step-catalog cache preloaded, all catalog actions
+  have registered handlers).
 
 ### Wire with the provisioning activities
 - `httpclient` — Svix + Lago external calls (TLS, retry, pool, OTel). Temporal also
