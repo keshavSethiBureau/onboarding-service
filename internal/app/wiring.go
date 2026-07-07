@@ -32,6 +32,7 @@ import (
 	"onboarding-service/internal/config"
 	"onboarding-service/internal/controller"
 	"onboarding-service/internal/platform/auth0"
+	"onboarding-service/internal/platform/authsvc"
 	"onboarding-service/internal/platform/provisioning"
 	"onboarding-service/internal/repo"
 	mongorepo "onboarding-service/internal/repo/mongo"
@@ -221,7 +222,16 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init auth: %w", err)
 	}
-	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter)
+	meClient, err := authsvc.NewHTTPMeClient(authsvc.Settings{
+		BaseURL:           cfg.AuthService.BaseURL,
+		Attempts:          cfg.AuthService.Attempts,
+		PerAttemptTimeout: parseDurationOr(cfg.AuthService.PerAttemptTimeout, 2*time.Second),
+		Backoff:           parseDurationOr(cfg.AuthService.Backoff, 200*time.Millisecond),
+	}, registry)
+	if err != nil {
+		return nil, fmt.Errorf("failed to init auth /me client: %w", err)
+	}
+	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter, meClient)
 
 	// internal endpoint (Auth Service only) — starts/signals the workflow.
 	internalCtrl := controller.NewInternalOnboardingController(starter)
@@ -254,6 +264,19 @@ func Wire() (*Container, error) {
 			return telErr
 		},
 	}, nil
+}
+
+// parseDurationOr parses a duration string, returning fallback when empty or
+// invalid (config supplies these as ${VAR:default} strings).
+func parseDurationOr(s string, fallback time.Duration) time.Duration {
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 // seedAndLoadCatalog seeds the deployed baseline catalog versions (idempotent),

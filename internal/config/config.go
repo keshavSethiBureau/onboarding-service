@@ -18,6 +18,17 @@ type Config struct {
 	Auth         AuthConfig         `yaml:"auth"`
 	Internal     InternalConfig     `yaml:"internal"`
 	Provisioning ProvisioningConfig `yaml:"provisioning"`
+	AuthService  AuthServiceConfig  `yaml:"authService"`
+}
+
+// AuthServiceConfig points at the (existing) Authentication Service. Its /me is
+// called once at signup; /me logic is NEVER reimplemented here. BaseURL empty
+// (local dev) means /me calls fail until configured.
+type AuthServiceConfig struct {
+	BaseURL           string `yaml:"baseUrl"`
+	Attempts          int    `yaml:"attempts"`
+	PerAttemptTimeout string `yaml:"perAttemptTimeout"`
+	Backoff           string `yaml:"backoff"`
 }
 
 // ProvisioningConfig holds the post-org provisioning integrations. When the

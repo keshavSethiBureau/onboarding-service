@@ -27,6 +27,14 @@ auth:
 internal:
   authToken: ${INTERNAL_AUTH_TOKEN:}
 
+# Authentication Service /me — called once at signup for fresh claims. /me logic
+# stays in Auth; we only call it. Bounded timeout + retry keep signup safe.
+authService:
+  baseUrl: ${AUTHENTICATION_SVC_BASE_URL:}
+  attempts: ${AUTH_ME_ATTEMPTS:3}
+  perAttemptTimeout: ${AUTH_ME_TIMEOUT:2s}
+  backoff: ${AUTH_ME_BACKOFF:200ms}
+
 # Post-org provisioning (real Svix/Lago/Kong via httpclient + AWS via SDK when set).
 # Env var names match the auth service (overwatch-authentication-service) so the
 # same secrets configure both services.

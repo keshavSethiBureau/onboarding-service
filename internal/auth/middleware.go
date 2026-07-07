@@ -16,8 +16,9 @@ import (
 
 // Context keys under which the middleware stores the caller identity.
 const (
-	CtxUserID = "auth.userID"
-	CtxOrgID  = "auth.orgID"
+	CtxUserID        = "auth.userID"
+	CtxOrgID         = "auth.orgID"
+	CtxEmailVerified = "auth.emailVerified"
 )
 
 // Config configures the Auth0 validator.
@@ -28,10 +29,12 @@ type Config struct {
 	JWKSURL  string
 }
 
-// onboardingClaims are the token claims we consume: sub -> userId (RegisteredClaims)
-// and the Auth0 org token's org_id -> orgId.
+// onboardingClaims are the token claims we consume: sub -> userId (RegisteredClaims),
+// the Auth0 org token's org_id -> orgId, and email_verified -> drives the
+// EMAIL_VERIFIED signal.
 type onboardingClaims struct {
-	OrgID string `json:"org_id"`
+	OrgID         string `json:"org_id"`
+	EmailVerified bool   `json:"email_verified"`
 	jwt.RegisteredClaims
 }
 
@@ -92,6 +95,7 @@ func (m *Middleware) Handler() gin.HandlerFunc {
 		}
 
 		setIdentity(c, claims.Subject, claims.OrgID)
+		c.Set(CtxEmailVerified, claims.EmailVerified)
 		c.Next()
 	}
 }
@@ -104,6 +108,7 @@ func (m *Middleware) handleDisabled(c *gin.Context) {
 		return
 	}
 	setIdentity(c, userID, c.GetHeader("X-Org-Id"))
+	c.Set(CtxEmailVerified, c.GetHeader("X-Email-Verified") == "true")
 	c.Next()
 }
 
@@ -119,6 +124,16 @@ func Identity(c *gin.Context) (userID, orgID string, ok bool) {
 		orgID, _ = o.(string)
 	}
 	return userID, orgID, userID != ""
+}
+
+// EmailVerified reports whether the validated token carried email_verified=true.
+func EmailVerified(c *gin.Context) bool {
+	v, ok := c.Get(CtxEmailVerified)
+	if !ok {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
 }
 
 func setIdentity(c *gin.Context, userID, orgID string) {
