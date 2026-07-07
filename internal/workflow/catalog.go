@@ -65,8 +65,20 @@ var stepCatalog = map[int][]StepDef{
 	},
 }
 
-// CatalogSteps returns the ordered step list for a version (nil if unknown).
-func CatalogSteps(version int) []StepDef { return stepCatalog[version] }
+// CatalogSteps returns the ordered step list for a version (nil if unknown),
+// read from the preloaded active catalog.
+func CatalogSteps(version int) []StepDef { return activeCatalog.Steps(version) }
 
-// FirstStep is where a fresh journey starts (used by the resume-screen fallback).
-func FirstStep() string { return stepCatalog[CatalogVersion][0].Name }
+// LatestCatalogVersion is max(version) in the preloaded catalog. New journeys
+// pin this at workflow start; the pin never changes for the journey's life.
+func LatestCatalogVersion() int { return activeCatalog.LatestVersion() }
+
+// FirstStep is the first step of the latest catalog version (resume-screen
+// fallback). Falls back to the built-in version if the cache is somehow empty.
+func FirstStep() string {
+	steps := activeCatalog.Steps(activeCatalog.LatestVersion())
+	if len(steps) == 0 {
+		return stepCatalog[CatalogVersion][0].Name
+	}
+	return steps[0].Name
+}

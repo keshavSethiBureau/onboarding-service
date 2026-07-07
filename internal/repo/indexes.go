@@ -15,12 +15,14 @@ const (
 	CollOnboardingJourneys  = "onboarding_journeys"
 	CollOnboardingSteps     = "onboarding_steps"
 	CollProvisioningRecords = "provisioning_records"
+	CollStepCatalogs        = "step_catalogs"
 )
 
 // EnsureIndexes creates the indexes described in the LLD on startup:
 //   - onboarding_journeys:  unique index on userId
 //   - onboarding_steps:     index on journeyId
 //   - provisioning_records: unique index on orgId
+//   - step_catalogs:        unique index on version (insert-only collection)
 //
 // CreateOne is idempotent for an identical index spec, so this is safe to run
 // on every boot.
@@ -48,6 +50,15 @@ func EnsureIndexes(ctx context.Context, m *mongoclient.BureauMongoClient) error 
 			model: mongo.IndexModel{
 				Keys:    bson.D{{Key: "orgId", Value: 1}},
 				Options: options.Index().SetUnique(true).SetName("uniq_orgId"),
+			},
+		},
+		{
+			// Insert-only catalog versions: the unique index is what makes the
+			// max+1 allocation race-safe (the loser's insert fails and retries).
+			collection: CollStepCatalogs,
+			model: mongo.IndexModel{
+				Keys:    bson.D{{Key: "version", Value: 1}},
+				Options: options.Index().SetUnique(true).SetName("uniq_version"),
 			},
 		},
 	}

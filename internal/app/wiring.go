@@ -115,6 +115,16 @@ func Wire() (*Container, error) {
 	// repositories (DAO layer)
 	journeyRepo := mongorepo.NewOnboardingJourneyRepo(mongoCli)
 	provisioningRepo := mongorepo.NewProvisioningRecordRepo(mongoCli)
+	catalogRepo := mongorepo.NewStepCatalogRepo(mongoCli)
+
+	// step catalog (versioned, insert-only) — seed the deployed baseline, then
+	// preload every version into the local cache and validate that every action
+	// it references has a registered activity handler. A catalog version this
+	// binary cannot execute fails startup (readiness) rather than stranding a
+	// journey pinned to it. Runtime-inserted versions activate only on restart.
+	if err := seedAndLoadCatalog(mongoCtx, catalogRepo); err != nil {
+		return nil, fmt.Errorf("failed to load step catalog: %w", err)
+	}
 
 	// external integration ports — always the real clients (no stub fallback).
 	// They construct fine with empty config; only the actual Auth0/Svix/Lago/
@@ -244,6 +254,27 @@ func Wire() (*Container, error) {
 			return telErr
 		},
 	}, nil
+}
+
+// seedAndLoadCatalog seeds the deployed baseline catalog versions (idempotent),
+// preloads all versions from the durable collection into the workflow's active
+// cache, and validates that every referenced action has a registered handler.
+func seedAndLoadCatalog(ctx context.Context, catalogRepo repo.StepCatalogRepo) error {
+	for version, steps := range workflow.BuiltinCatalog() {
+		if err := catalogRepo.EnsureVersion(ctx, version, workflow.StepDefsToDocs(steps)); err != nil {
+			return fmt.Errorf("seed catalog version %d: %w", version, err)
+		}
+	}
+	docs, err := catalogRepo.LoadAll(ctx)
+	if err != nil {
+		return fmt.Errorf("preload catalog: %w", err)
+	}
+	cache := workflow.CacheFromDocs(docs)
+	if err := cache.ValidateActions(workflow.RegisteredActions()); err != nil {
+		return err
+	}
+	workflow.UseCatalogCache(cache)
+	return nil
 }
 
 // Run starts the HTTP server and handles graceful shutdown on SIGINT/SIGTERM:

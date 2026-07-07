@@ -42,7 +42,10 @@ func (s *Starter) signalStep(ctx context.Context, userID, signalName string, pay
 			WorkflowIDConflictPolicy: enums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		},
 		OnboardingWorkflow,
-		WorkflowInput{UserID: userID, StepCatalogVersion: CatalogVersion},
+		// Pin the latest catalog version at start. USE_EXISTING means this input
+		// is honoured only when the workflow is first created, so an in-flight
+		// journey keeps its original pinned version.
+		WorkflowInput{UserID: userID, StepCatalogVersion: LatestCatalogVersion()},
 	)
 	if err != nil {
 		return "", err
