@@ -180,18 +180,14 @@ type ProvisioningRecord struct {
     UpdatedAt         time.Time
 }
 
-// collection: step_catalogs ; unique index (version) ; INSERT-ONLY
-// One document per catalog version. A version's steps are immutable once created —
-// never updated or deleted. A step change = inserting a NEW version.
-type StepCatalog struct {
-    Version   int        // monotonically increasing; assigned as max(version)+1
-    Steps     []StepDef  // ordered list of steps for this version
-    CreatedAt time.Time
-}
-
+// The step catalog is IN-CODE (not a Mongo collection): a versioned map defined
+// in internal/workflow/catalog.go. One entry per version; a version's steps are
+// immutable once shipped — a change is a NEW version key, never an edit. See §6.1a.
 type StepDef struct {
-    Name   string  // step name recorded on the journey
-    Action string  // which activity handler runs for this step
+    Name          string  // step name recorded on the journey
+    Action        string  // which activity handler runs for this step (empty = record-only)
+    Signal        string  // signal to await if user-driven (empty = system-driven)
+    MarksComplete bool    // reaching this step marks the journey completed
 }
 ```
 
@@ -199,32 +195,31 @@ Note: no `onboarding_steps` collection and no `user_verticals` collection — st
 detail is embedded on the journey (operational) and emitted as events (analytics);
 vertical lives on the journey.
 
-### 6.1a Step catalog storage, caching & versioning (Mongo-backed)
+### 6.1a Step catalog storage, caching & versioning (in-code)
 
-- **Source of truth = `step_catalogs` in Mongo; runtime reads = local cache.** At
-  startup, ALL versions are preloaded into a per-instance in-memory cache and served
-  cache-only through the same lookup interface the workflow executor uses (executor
-  unchanged). Readiness fails if the cache did not load.
-- **Insert-only / immutable:** a version's steps never change once created. This is
-  what keeps Temporal replay deterministic — a given `StepCatalogVersion` always
-  resolves to the same ordered steps forever. Application logic rejects any attempt to
-  modify an existing version; the unique `version` index backs this.
-- **Cache-miss fallback:** a version inserted after startup is loaded once from Mongo
-  on first lookup and cached forever (safe because immutable). A cached version is
-  never re-read.
-- **Creating a version:** read `currentMax = max(version)` (NOT a document count —
-  count can diverge from max and must never derive a version number); insert with
-  `version = currentMax + 1`; if the unique index rejects it (concurrent creation),
-  re-read max and retry (bounded). Never update/delete an existing version.
-- **Latest for new journeys:** `LatestVersion() = max(version)` in the cache (never
-  count). New journeys pin `StepCatalogVersion = LatestVersion()` at workflow start;
-  the pin never changes for the journey's life. Because the cache is preloaded at
-  startup, a version inserted at runtime becomes "latest" only after instance restart —
-  intentional: a new version's steps need newly deployed activity handlers, so the
-  deploy that ships the handlers is what activates the version.
-- **Deploy-order safety:** at startup, after preloading, validate that every `action`
-  referenced by every catalog version has a registered activity handler; fail readiness
-  otherwise.
+- **Source of truth = the in-code `stepCatalog` map** (`internal/workflow/catalog.go`).
+  At startup it is loaded into an immutable per-instance snapshot (`CatalogCache`) and
+  served through the same lookup interface the workflow executor uses (executor
+  unchanged). There is no Mongo `step_catalogs` collection — the catalog ships in the
+  binary. (An earlier design stored it in Mongo with `max+1` version allocation for
+  runtime creation; that was removed because no runtime/admin path ever created a
+  version — every version ships in code and activates on deploy. Reintroduce a durable
+  store only if admin-editable flows — reordering steps that reuse already-deployed
+  actions — become a real need.)
+- **Insert-only / immutable:** a shipped version's steps never change — a change is a
+  NEW version key, never an edit to an existing list. This keeps Temporal replay
+  deterministic: a given `StepCatalogVersion` always resolves to the same ordered steps
+  forever. A golden test (`TestCatalogV1_Immutable`) pins each shipped version so an
+  accidental edit fails CI.
+- **Latest for new journeys:** `LatestVersion() = max(version)` in the cache (max over
+  the version keys, never a count). New journeys pin `StepCatalogVersion =
+  LatestVersion()` at workflow start; the pin never changes for the journey's life.
+  Because the catalog is fixed in the binary, a new version becomes "latest" only after
+  a deploy — intentional: a new version's steps need newly deployed activity handlers,
+  so the deploy that ships the handlers is what activates the version.
+- **Deploy-order safety:** at startup, after building the cache, validate that every
+  `action` referenced by every catalog version has a registered activity handler; fail
+  startup (readiness) otherwise.
 
 ### 6.2 Apollo config + cache (not Mongo)
 
@@ -354,16 +349,15 @@ half-completed under Auth is not double-created.
 - `configloader` — boot/infra config: Mongo URI, Auth0, Temporal address, ports.
 - `configlib` (Apollo) — verticals + questions; hot-reload into per-instance cache.
 - `mongoclient` — datastore singleton; create indexes at startup
-  (unique userId on onboarding_journeys; unique orgId on provisioning_records;
-  unique version on step_catalogs).
+  (unique userId on onboarding_journeys; unique orgId on provisioning_records).
 - `temporalclient` — Temporal workflow client + worker registration.
 - `telemetry` — OpenTelemetry global setup at boot.
 - `metricx` — Prometheus façade + `/metrics`.
-- Startup also: preload ALL step_catalogs versions into the local cache, and validate
-  every catalog action has a registered activity handler.
+- Startup also: build the in-code step-catalog cache and validate every catalog
+  action has a registered activity handler (fail startup otherwise).
 - Health check — liveness (process up) + readiness (Mongo connected, Temporal
-  reachable, vertical cache warm, step-catalog cache preloaded, all catalog actions
-  have registered handlers).
+  reachable, vertical cache warm). The step catalog is validated at boot (fail-fast),
+  so it is not a separate readiness probe.
 
 ### Wire with the provisioning activities
 - `httpclient` — Svix + Lago external calls (TLS, retry, pool, OTel). Temporal also

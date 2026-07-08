@@ -3,41 +3,24 @@ package workflow
 import (
 	"fmt"
 	"sort"
-
-	"onboarding-service/internal/repo"
 )
 
-// CatalogCache is an immutable, preloaded snapshot of the step catalog versions
-// an instance can execute. It is built once at startup (from the durable
-// step_catalogs collection) and never mutated afterwards, so both the executor
-// (via CatalogSteps) and the Starter (via LatestVersion) read a stable,
-// replay-safe view for the instance's lifetime.
+// CatalogCache is an immutable snapshot of the step catalog versions an instance
+// can execute. It is built once at startup from the in-code catalog and never
+// mutated afterwards, so both the executor (via CatalogSteps) and the Starter
+// (via LatestVersion) read a stable, replay-safe view for the instance's lifetime.
 type CatalogCache struct {
 	versions map[int][]StepDef
 }
 
 // NewCatalogCache builds a cache from an in-code version map (defensively
-// copied). Used for the built-in default and in tests.
+// copied). Used for the built-in catalog and in tests.
 func NewCatalogCache(versions map[int][]StepDef) *CatalogCache {
 	cp := make(map[int][]StepDef, len(versions))
 	for v, steps := range versions {
 		cp[v] = steps
 	}
 	return &CatalogCache{versions: cp}
-}
-
-// CacheFromDocs builds a cache from the durable catalog documents (startup
-// preload).
-func CacheFromDocs(docs []repo.StepCatalogDoc) *CatalogCache {
-	versions := make(map[int][]StepDef, len(docs))
-	for _, d := range docs {
-		steps := make([]StepDef, len(d.Steps))
-		for i, s := range d.Steps {
-			steps[i] = StepDef{Name: s.Name, Action: s.Action, Signal: s.Signal, MarksComplete: s.MarksComplete}
-		}
-		versions[d.Version] = steps
-	}
-	return &CatalogCache{versions: versions}
 }
 
 // LatestVersion returns max(version) among the cached versions, or 0 if empty.
@@ -100,24 +83,15 @@ func RegisteredActions() map[string]bool {
 	}
 }
 
-// StepDefsToDocs converts in-code step defs to their storage twins (startup
-// seed of the deployed baseline into step_catalogs).
-func StepDefsToDocs(steps []StepDef) []repo.StepDefDoc {
-	docs := make([]repo.StepDefDoc, len(steps))
-	for i, s := range steps {
-		docs[i] = repo.StepDefDoc{Name: s.Name, Action: s.Action, Signal: s.Signal, MarksComplete: s.MarksComplete}
-	}
-	return docs
-}
-
 // activeCatalog is the catalog the executor and Starter read. It defaults to
 // the in-code catalog and is replaced once at startup by UseCatalogCache after
-// the durable versions are preloaded and validated.
+// action-handler validation.
 var activeCatalog = NewCatalogCache(stepCatalog)
 
-// UseCatalogCache installs the preloaded catalog. Call once at startup, before
+// UseCatalogCache installs the validated catalog. Call once at startup, before
 // the worker starts polling — never while workflows are executing.
 func UseCatalogCache(c *CatalogCache) { activeCatalog = c }
 
-// BuiltinCatalog exposes the in-code catalog for startup seeding.
+// BuiltinCatalog exposes the in-code catalog (the source of truth for the
+// versions this binary can execute).
 func BuiltinCatalog() map[int][]StepDef { return stepCatalog }

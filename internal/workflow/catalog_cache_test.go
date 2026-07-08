@@ -2,17 +2,15 @@ package workflow
 
 import (
 	"testing"
-
-	"onboarding-service/internal/repo"
 )
 
 // TestLatestVersion_IsMaxNotCount proves LatestVersion returns max(version),
-// and stays correct in a contrived state where the document COUNT differs from
+// and stays correct in a contrived state where the version COUNT differs from
 // the max: versions {1, 3} present (count=2) must resolve latest=3, never 2.
 func TestLatestVersion_IsMaxNotCount(t *testing.T) {
-	cache := CacheFromDocs([]repo.StepCatalogDoc{
-		{Version: 1, Steps: []repo.StepDefDoc{{Name: "A"}}},
-		{Version: 3, Steps: []repo.StepDefDoc{{Name: "A"}}},
+	cache := NewCatalogCache(map[int][]StepDef{
+		1: {{Name: "A"}},
+		3: {{Name: "A"}},
 	})
 
 	if got := cache.LatestVersion(); got != 3 {
@@ -24,7 +22,7 @@ func TestLatestVersion_IsMaxNotCount(t *testing.T) {
 }
 
 func TestLatestVersion_EmptyCacheIsZero(t *testing.T) {
-	if got := CacheFromDocs(nil).LatestVersion(); got != 0 {
+	if got := NewCatalogCache(nil).LatestVersion(); got != 0 {
 		t.Fatalf("LatestVersion() on empty cache = %d, want 0", got)
 	}
 }
@@ -36,10 +34,8 @@ func TestValidateActions(t *testing.T) {
 		t.Fatalf("built-in catalog should validate against registered actions: %v", err)
 	}
 
-	bad := CacheFromDocs([]repo.StepCatalogDoc{
-		{Version: 2, Steps: []repo.StepDefDoc{
-			{Name: "STEP_X", Action: "NotARegisteredHandler"},
-		}},
+	bad := NewCatalogCache(map[int][]StepDef{
+		2: {{Name: "STEP_X", Action: "NotARegisteredHandler"}},
 	})
 	if err := bad.ValidateActions(RegisteredActions()); err == nil {
 		t.Fatal("expected validation error for an unregistered action handler")

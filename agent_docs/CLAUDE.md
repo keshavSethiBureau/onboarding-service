@@ -84,9 +84,8 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 ## Collections (Mongo, own DB)
 - `onboarding_journeys`   — unique index (userId); denormalised read-model with embedded Steps
 - `provisioning_records`  — unique index (orgId); Svix + Lago status
-- `step_catalogs`         — unique index (version); INSERT-ONLY, versions immutable;
-                            preloaded into local cache at startup, reads are cache-only
 (No onboarding_steps collection — step detail is embedded on the journey; analytics via emitted events.)
+(The step catalog is IN-CODE, not a Mongo collection — see the hard rules below.)
 
 ## Hard rules
 - Identity (userId, orgId) is read from the Auth0 token, never from request bodies.
@@ -115,10 +114,10 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 - Verticals/questions are read-only at runtime from the in-memory cache, sourced from Apollo
   (`configlib`) with hot-reload. No custom refresh endpoint.
 - Every handler, activity, and Mongo call is traced (telemetry) and measured (metricx).
-- Step catalog lives in `step_catalogs` (Mongo), preloaded to a per-instance cache at
-  startup; reads are cache-only. NEVER modify an existing version — a step change is a
-  NEW version document. Latest = max(version), NEVER a document count. Cached versions
-  are never re-read. Creating a version: max(version)+1, retry on unique-index conflict.
+- Step catalog is IN-CODE (`internal/workflow/catalog.go`), loaded into an immutable
+  per-instance cache at startup; reads are cache-only. NEVER modify a shipped version —
+  a step change is a NEW version key + a deploy (its handlers must ship with it); a
+  golden test pins each shipped version. Latest = max(version), NEVER a version count.
 - The workflow is a GENERIC EXECUTOR: it reads the steps for the journey's pinned
   StepCatalogVersion and walks them, dispatching each step's action by name. No
   hardcoded `if step == X` branches. Keep granular activities (one per side effect) —
@@ -129,14 +128,14 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 - Metric labels are low-cardinality only (step, action, route, status) — NEVER userId
   or orgId as labels (those belong in logs).
 - At startup, validate every catalog action has a registered activity handler; fail
-  readiness otherwise (a new catalog version's handlers must ship in the same deploy).
+  startup otherwise (a new catalog version's handlers must ship in the same deploy).
 
 ## Boundaries (do not touch)
 - Do not add answer-storage for the questionnaire (out of scope; only question->vertical mapping).
 - Do not add template recommendations (future scope).
 - Do not put verticals or questions in Mongo.
 - Do not add an onboarding_steps or user_verticals collection (embedded on the journey).
-- Do not update or delete an existing step_catalogs version; do not derive latest from a count.
+- Do not edit a shipped in-code catalog version; add a NEW version. Do not derive latest from a count.
 
 ## Style
 - Return typed errors via a shared error helper; map to HTTP status in the controller layer.

@@ -122,14 +122,12 @@ func Wire() (*Container, error) {
 	// repositories (DAO layer)
 	journeyRepo := mongorepo.NewOnboardingJourneyRepo(mongoCli)
 	provisioningRepo := mongorepo.NewProvisioningRecordRepo(mongoCli)
-	catalogRepo := mongorepo.NewStepCatalogRepo(mongoCli)
 
-	// step catalog (versioned, insert-only) — seed the deployed baseline, then
-	// preload every version into the local cache and validate that every action
-	// it references has a registered activity handler. A catalog version this
-	// binary cannot execute fails startup (readiness) rather than stranding a
-	// journey pinned to it. Runtime-inserted versions activate only on restart.
-	if err := seedAndLoadCatalog(mongoCtx, catalogRepo, obsMetrics); err != nil {
+	// step catalog (in-code, versioned) — install the built-in catalog and
+	// validate that every action it references has a registered activity handler.
+	// A catalog this binary cannot execute fails startup (readiness) rather than
+	// stranding a journey pinned to it. New versions ship in the binary + deploy.
+	if err := loadCatalog(obsMetrics); err != nil {
 		return nil, fmt.Errorf("failed to load step catalog: %w", err)
 	}
 
@@ -290,23 +288,14 @@ func Wire() (*Container, error) {
 // 	return d
 // }
 
-// seedAndLoadCatalog seeds the deployed baseline catalog versions (idempotent),
-// preloads all versions from the durable collection into the workflow's active
-// cache, and validates that every referenced action has a registered handler.
-func seedAndLoadCatalog(ctx context.Context, catalogRepo repo.StepCatalogRepo, m *observability.Metrics) error {
-	for version, steps := range workflow.BuiltinCatalog() {
-		if err := catalogRepo.EnsureVersion(ctx, version, workflow.StepDefsToDocs(steps)); err != nil {
-			return fmt.Errorf("seed catalog version %d: %w", version, err)
-		}
-	}
-	docs, err := catalogRepo.LoadAll(ctx)
-	if err != nil {
-		return fmt.Errorf("preload catalog: %w", err)
-	}
-	cache := workflow.CacheFromDocs(docs)
+// loadCatalog installs the in-code step catalog as the active cache and
+// validates that every action it references has a registered activity handler.
+// Boot-blocking: a catalog this binary cannot execute fails startup rather than
+// stranding a journey pinned to it. A new catalog version is a code change that
+// ships (and activates) with its handlers in the same deploy.
+func loadCatalog(m *observability.Metrics) error {
+	cache := workflow.NewCatalogCache(workflow.BuiltinCatalog())
 	if err := cache.ValidateActions(workflow.RegisteredActions()); err != nil {
-		// Readiness-blocking: a catalog version references an action this binary
-		// cannot execute (handlers must ship in the same deploy).
 		slog.Error("catalog action validation failed", "error", err.Error())
 		return err
 	}
