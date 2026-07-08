@@ -8,29 +8,23 @@
 Owns the entire onboarding journey from login onward. The frontend authenticates
 directly with Auth0 via SDK (Universal Login) — we do NOT proxy interactive
 login/signup through any backend. After Auth0 returns the JWT, the frontend calls
-its existing `/me` on the Auth Service (unchanged — no /me logic migrates here).
-There are two entry points into the journey:
-- **At signup:** the frontend calls `POST /v1/onboarding/signup` on this service,
-  which calls Auth's `/me` to obtain the fresh signup identity/claims and uses them
-  to start the journey — so the journey starts atomically at signup (see note below).
-- **At every later login:** the frontend calls `GET /v1/onboarding/state` with the
-  JWT (no proxying of the login `/me`).
+its existing `/me` on the Auth Service (unchanged — no /me logic migrates here, and
+this service NEVER calls it). There is ONE journey entry point:
+- The frontend calls `GET /v1/onboarding/state` with the JWT (on signup completion
+  and on every login). If no journey exists for the user, this service creates the
+  workflow and records `USER_SIGNED_UP` as the first step; otherwise it returns the
+  current state. `EMAIL_VERIFIED` advances from the token claim when true.
 From there this service owns everything: journey start,
 email-verification tracking (read from the JWT's `email_verified` claim), organisation
 creation (calling Auth0's Management API), vertical selection, questionnaire display,
 and all post-org provisioning (Svix, Lago, and other migrated setup).
 
-The Authentication Service makes NO calls into this service. `/me` stays in Auth
-untouched (no logic migrates). The only call in the other direction is a single,
-signup-only call from this service to Auth's `/me`, used to start the journey.
-
-Atomic-start note: true cross-service transactionality is impossible (two systems,
-no shared commit), so "atomic" here means effectively-atomic-and-safely-retryable.
-The signup entry does (call /me) + (start workflow) together; because workflow start
-is idempotent (WorkflowID = userId) and the state endpoint is idempotent, a
-half-failed signup can be retried with no duplicate journey or corrupted state. If
-Auth is slow/down at signup, retry; worst case the frontend falls back to the normal
-`GET /v1/onboarding/state` entry point on the next authenticated call.
+There are ZERO calls between the Authentication Service and this service, in either
+direction. `/me` stays in Auth untouched; this service never calls it. The JWT alone
+carries the facts this service needs (sub, org_id, email_verified), and this service
+validates the token LOCALLY (signature/expiry/issuer/audience via cached Auth0 JWKS —
+never by delegating validation to Auth). Journey creation is idempotent (WorkflowID =
+userId), so a half-failed first call retries cleanly with no duplicate journey.
 
 Migration note: today the frontend calls the Authentication Service, which calls
 Auth0 to create the organisation and then runs post-creation setup. After this
@@ -83,7 +77,8 @@ recommendations, analytics dashboards, workflow versioning. (All future scope.)
 Current catalog (v1), in order:
 
 ```
-LOGGED_IN               // first GET /v1/onboarding/state with a valid JWT -> starts the workflow
+USER_SIGNED_UP          // first GET /v1/onboarding/state with a valid JWT and no
+                        // existing journey -> creates the workflow, records this step
 EMAIL_VERIFIED          // recorded when /v1/onboarding/state sees email_verified=true in the JWT
                         // (frontend refreshes the token after the user clicks the link)
 ORGANISATION_CREATED    // Go service calls Auth0 Management API to create the org
@@ -125,7 +120,8 @@ to the first step they have not completed.
   each step retries/recovers independently. A single activity doing everything would
   re-run already-succeeded work on any failure and discard Temporal's core value.
 - **Workflow:** `OnboardingWorkflow`, one per user (WorkflowID = userId), started
-  by the first `GET /v1/onboarding/state` call (LOGGED_IN). This endpoint is
+  by the first `GET /v1/onboarding/state` call for a user with no existing journey
+  (records USER_SIGNED_UP). This endpoint is
   idempotent: it is called on every login forever, so start-if-absent must be a no-op
   when the workflow exists, and signalling an already-completed step must be a no-op.
 - **Signals:** the Auth Service (and the frontend) advance the workflow by sending
@@ -258,12 +254,10 @@ type Question struct {
 ```
 POST /v1/onboarding/organisation  frontend calls this to create the org (Go calls Auth0);
                                    starts the workflow and records ORGANISATION_CREATED
-POST /v1/onboarding/signup         SIGNUP ENTRY POINT. Calls Auth's /me for fresh
-                                    claims, starts the workflow (LOGGED_IN; EMAIL_VERIFIED
-                                    if already true), returns journey state. Idempotent.
-GET  /v1/onboarding/state          LOGIN ENTRY POINT + resume. Starts the workflow if
-                                    absent (LOGGED_IN); reads email_verified from the
-                                    JWT and signals EMAIL_VERIFIED when true; returns
+GET  /v1/onboarding/state          THE JOURNEY ENTRY POINT + resume. If no journey
+                                    exists, creates the workflow and records
+                                    USER_SIGNED_UP; reads email_verified from the JWT
+                                    and signals EMAIL_VERIFIED when true; returns
                                     { current_step, status }. Idempotent on every call.
 GET  /v1/verticals                 list active verticals (from cache)
 POST /v1/onboarding/vertical       body { vertical_name }; signals VerticalSelected
@@ -287,7 +281,7 @@ hot-reload, not an endpoint.
 Auth0 login (frontend <-> Auth0 SDK) -> JWT { sub=userId, org_id, email_verified }
   -> frontend calls /me on Auth (unchanged, existing logic)
   -> frontend ALSO calls GET /v1/onboarding/state here (same JWT)
-  -> starts workflow if absent (LOGGED_IN); signals EMAIL_VERIFIED if claim true
+  -> creates workflow if absent (USER_SIGNED_UP); signals EMAIL_VERIFIED if claim true
   -> returns currentStep from the journey read-model
   -> frontend routes to that step
 ```

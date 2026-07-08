@@ -2,11 +2,11 @@
 
 Go service that owns the onboarding journey from login onward. The frontend
 authenticates directly with Auth0 (SDK / Universal Login — never proxied through a
-backend); it then calls its existing /me on the Auth Service (unchanged). Two journey
-entry points: at SIGNUP the frontend calls POST /v1/onboarding/signup here (which
-calls Auth's /me once to get fresh claims and starts the journey atomically); at
-every later LOGIN the frontend calls GET /v1/onboarding/state with the JWT (no proxy
-of login /me). This service owns: journey start (LOGGED_IN), email-verification tracking
+backend); it then calls its existing /me on the Auth Service (unchanged — this
+service NEVER calls /me and never proxies it). ONE journey entry point: the frontend
+calls GET /v1/onboarding/state with the JWT; if no journey exists we create the
+workflow and record USER_SIGNED_UP, else we return state. This service owns: journey
+start (USER_SIGNED_UP), email-verification tracking
 (from the JWT email_verified claim), organisation creation (Auth0 Management API),
 vertical selection, questionnaire display, and all post-org provisioning (Svix,
 Lago, and other migrated setup). The Authentication Service is NOT in the
@@ -92,14 +92,15 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 - Identity (userId, orgId) is read from the Auth0 token, never from request bodies.
 - There are NO internal endpoints for the Auth Service — it never calls this service.
 - Onboarding is a Temporal workflow (WorkflowID = userId), started by the first
-  GET /v1/onboarding/state call (LOGGED_IN). That endpoint is idempotent: called on
-  every login forever; start-if-absent and already-completed-step signals are no-ops.
-  It reads email_verified from the JWT and signals EMAIL_VERIFIED when true (frontend
-  refreshes the token after the user verifies). /me stays in the Auth Service,
-  untouched — never reimplement or migrate its logic here.
-- Signup entry (POST /v1/onboarding/signup) is the ONLY call from this service to Auth
-  (calls /me once to start the journey). It must be idempotent and retry-safe; if Auth
-  is down, retry, and the login /state entry is the fallback. Login /me is NEVER proxied.
+  GET /v1/onboarding/state call for a user with no journey (records USER_SIGNED_UP).
+  That endpoint is idempotent: called on every login forever; create-if-absent and
+  already-completed-step signals are no-ops. It reads email_verified from the JWT and
+  signals EMAIL_VERIFIED when true (frontend refreshes the token after verification).
+- ZERO calls between this service and the Auth Service, either direction. /me stays in
+  Auth untouched — never call it, proxy it, reimplement it, or migrate its logic here.
+- Every /v1 route validates the Auth0 JWT LOCALLY (signature, expiry, issuer, audience
+  via cached JWKS — use commons/standard middleware, don't hand-roll). Never delegate
+  token validation to the Auth Service.
 - Org creation is owned by THIS service: `POST /v1/onboarding/organisation` calls
   Auth0 to create the org (idempotent CreateOrganisation activity), records
   ORGANISATION_CREATED, then runs the migrated post-org setup activities.
