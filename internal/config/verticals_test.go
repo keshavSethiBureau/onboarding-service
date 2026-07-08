@@ -102,6 +102,27 @@ func TestLoadVerticalCacheInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestVerticalCache_MissHandlerFires(t *testing.T) {
+	c := NewVerticalCache()
+	c.Replace([]Vertical{{Name: "KYC"}}, nil)
+
+	var misses []string
+	c.SetMissHandler(func(cache string) { misses = append(misses, cache) })
+
+	if _, ok := c.Vertical("KYC"); !ok {
+		t.Fatal("expected hit for KYC")
+	}
+	if _, ok := c.Vertical("Nope"); ok {
+		t.Fatal("expected miss for Nope")
+	}
+	if _, ok := c.Questions("AlsoNope"); ok {
+		t.Fatal("expected miss for AlsoNope questions")
+	}
+	if len(misses) != 2 || misses[0] != "verticals" || misses[1] != "verticals" {
+		t.Fatalf("miss handler fired %v, want two verticals misses", misses)
+	}
+}
+
 func TestSeedDefaultsParse(t *testing.T) {
 	defaults := SeedDefaults()
 	verticals, err := parseVerticals(defaults[KeyVerticals])

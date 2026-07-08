@@ -5,6 +5,7 @@ package workflow
 import (
 	"time"
 
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -30,18 +31,23 @@ type SignalPayload struct {
 	TncAccepted  string `json:"tncAccepted"`
 }
 
-// Register wires the workflow and activities onto a Temporal worker. Activities
-// are registered under their method names, which the catalog dispatches by.
+// Register wires the workflow and activities onto a Temporal worker. Every
+// activity is registered THROUGH the shared instrumentation wrapper (under its
+// original name, which the catalog dispatches by) so activity metrics live in
+// one place rather than being pasted into each activity. The commons worker
+// factory doesn't expose custom Temporal interceptors, so the registration
+// wrapper is the one-place equivalent.
 func Register(r worker.Registry, a *Activities) {
+	m := a.metrics
 	r.RegisterWorkflow(OnboardingWorkflow)
-	r.RegisterActivity(a.PersistJourneyState)
-	r.RegisterActivity(a.EmitStepEvent)
-	r.RegisterActivity(a.CreateOrganisation)
-	r.RegisterActivity(a.ProvisionKong)
-	r.RegisterActivity(a.ProvisionAWS)
-	r.RegisterActivity(a.ProvisionSvix)
-	r.RegisterActivity(a.ProvisionLago)
-	r.RegisterActivity(a.CompleteProvisioning)
+	r.RegisterActivityWithOptions(instrumentE(m, "PersistJourneyState", a.PersistJourneyState), activity.RegisterOptions{Name: "PersistJourneyState"})
+	r.RegisterActivityWithOptions(instrumentE(m, "EmitStepEvent", a.EmitStepEvent), activity.RegisterOptions{Name: "EmitStepEvent"})
+	r.RegisterActivityWithOptions(instrumentR(m, ActionCreateOrganisation, a.CreateOrganisation), activity.RegisterOptions{Name: ActionCreateOrganisation})
+	r.RegisterActivityWithOptions(instrumentR(m, ActionProvisionKong, a.ProvisionKong), activity.RegisterOptions{Name: ActionProvisionKong})
+	r.RegisterActivityWithOptions(instrumentR(m, ActionProvisionAWS, a.ProvisionAWS), activity.RegisterOptions{Name: ActionProvisionAWS})
+	r.RegisterActivityWithOptions(instrumentR(m, ActionProvisionSvix, a.ProvisionSvix), activity.RegisterOptions{Name: ActionProvisionSvix})
+	r.RegisterActivityWithOptions(instrumentR(m, ActionProvisionLago, a.ProvisionLago), activity.RegisterOptions{Name: ActionProvisionLago})
+	r.RegisterActivityWithOptions(instrumentR(m, ActionCompleteProvisioning, a.CompleteProvisioning), activity.RegisterOptions{Name: ActionCompleteProvisioning})
 }
 
 // OnboardingWorkflow is the GENERIC EXECUTOR (LLD §5). It walks the pinned
@@ -74,16 +80,22 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		StartedAt:          workflow.Now(ctx),
 	}
 
+	// Replay-safe logger (never a direct logger inside workflow code — that would
+	// break determinism). Metrics are emitted only from activities/interceptors.
+	logger := workflow.GetLogger(ctx)
+	logger.Info("onboarding workflow started", "userId", in.UserID, "stepCatalogVersion", version)
+
 	// Journey context threaded across steps (no read-model round-trips).
 	orgID := ""
 	displayName := ""
 	tncAccepted := ""
 	email := ""
 
-	for _, step := range CatalogSteps(version) {
+	for i, step := range CatalogSteps(version) {
 		// 1. Persist where the user is (drives the resume screen while awaiting a signal).
 		journey.CurrentStep = step.Name
 		if err := workflow.ExecuteActivity(ctx, persistActivity, journey).Get(ctx, nil); err != nil {
+			logger.Error("activity failed", "action", "PersistJourneyState", "step", step.Name, "error", err)
 			return err
 		}
 
@@ -108,6 +120,7 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			if err := workflow.ExecuteActivity(ctx, step.Action, ActionInput{
 				UserID: journey.UserID, OrgID: orgID, DisplayName: displayName, TncAccepted: tncAccepted, Email: email,
 			}).Get(ctx, &res); err != nil {
+				logger.Error("activity failed", "action", step.Action, "step", step.Name, "error", err)
 				return err
 			}
 			if res.OrgID != "" {
@@ -128,16 +141,25 @@ func OnboardingWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			journey.Status = dto.StatusCompleted
 			journey.CompletedAt = &now
 		}
+		logger.Info("step transition", "step", step.Name, "status", "completed")
 
-		// 5. Emit analytics step-event (its own activity/retry). Timestamp is
-		// workflow.Now so it is deterministic on replay.
+		// 5. Emit analytics step-event (its own activity/retry). The funnel +
+		// lifecycle counters are emitted inside EmitStepEvent; the workflow only
+		// sets the flags (first step -> started; MarksComplete -> completed).
+		// Timestamp is workflow.Now so it is deterministic on replay.
 		_ = workflow.ExecuteActivity(ctx, emitActivity, StepEvent{
 			UserID: journey.UserID, OrgID: orgID, Step: step.Name, Timestamp: now,
+			WorkflowStarted: i == 0, WorkflowCompleted: step.MarksComplete,
 		}).Get(ctx, nil)
 	}
 
 	// Final persist: last step completed + terminal status.
-	return workflow.ExecuteActivity(ctx, persistActivity, journey).Get(ctx, nil)
+	if err := workflow.ExecuteActivity(ctx, persistActivity, journey).Get(ctx, nil); err != nil {
+		logger.Error("activity failed", "action", "PersistJourneyState", "step", "final", "error", err)
+		return err
+	}
+	logger.Info("onboarding workflow completed", "userId", in.UserID, "status", journey.Status)
+	return nil
 }
 
 // Fixed (non-catalog) activity references, resolved by method name.

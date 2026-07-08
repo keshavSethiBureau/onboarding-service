@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,6 +32,7 @@ import (
 	"onboarding-service/internal/auth"
 	"onboarding-service/internal/config"
 	"onboarding-service/internal/controller"
+	"onboarding-service/internal/observability"
 	"onboarding-service/internal/platform/auth0"
 	"onboarding-service/internal/platform/authsvc"
 	"onboarding-service/internal/platform/provisioning"
@@ -100,6 +102,10 @@ func Wire() (*Container, error) {
 	// The same registry is handed to mongoclient so its pool/op metrics surface too.
 	registry := metricx.NewRegistry()
 
+	// observability instruments — constructed and registered once, injected into
+	// the activities and controllers that emit them.
+	obsMetrics := observability.NewMetrics(registry)
+
 	// mongo (datastore) — connect from the mongoclient section of config.yml,
 	// then create the collection indexes described in the LLD. Fails fast if
 	// MongoDB is unreachable at boot (mongoclient pings on connect).
@@ -123,7 +129,7 @@ func Wire() (*Container, error) {
 	// it references has a registered activity handler. A catalog version this
 	// binary cannot execute fails startup (readiness) rather than stranding a
 	// journey pinned to it. Runtime-inserted versions activate only on restart.
-	if err := seedAndLoadCatalog(mongoCtx, catalogRepo); err != nil {
+	if err := seedAndLoadCatalog(mongoCtx, catalogRepo, obsMetrics); err != nil {
 		return nil, fmt.Errorf("failed to load step catalog: %w", err)
 	}
 
@@ -174,6 +180,8 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load vertical cache: %w", err)
 	}
+	verticalCache.SetMissHandler(func(cache string) { obsMetrics.CacheMiss.WithLabelValues(cache).Inc() })
+	slog.Info("cache preload complete", "verticals", verticalCache.Len(), "catalogVersions", len(workflow.BuiltinCatalog()))
 
 	// temporal (orchestration) — client + a worker polling the onboarding task
 	// queue, registering the OnboardingWorkflow and its activities. mongoCtx
@@ -187,7 +195,7 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init temporal factory: %w", err)
 	}
-	activities := workflow.NewActivities(journeyRepo, provisioningRepo, orgCreator, provisioner)
+	activities := workflow.NewActivities(journeyRepo, provisioningRepo, orgCreator, provisioner).WithMetrics(obsMetrics)
 	temporalClients, temporalWorker, err := tfactory.StartWorker(mongoCtx, workflow.TaskQueue, func(r worker.Registry) {
 		workflow.Register(r, activities)
 	})
@@ -234,7 +242,7 @@ func Wire() (*Container, error) {
 	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter, meClient)
 
 	// internal endpoint (Auth Service only) — starts/signals the workflow.
-	internalCtrl := controller.NewInternalOnboardingController(starter)
+	internalCtrl := controller.NewInternalOnboardingController(starter, obsMetrics)
 	internalGuard := auth.InternalTokenMiddleware(cfg.Internal.AuthToken)
 
 	// router: trace + count every request, then register routes.
@@ -282,7 +290,7 @@ func parseDurationOr(s string, fallback time.Duration) time.Duration {
 // seedAndLoadCatalog seeds the deployed baseline catalog versions (idempotent),
 // preloads all versions from the durable collection into the workflow's active
 // cache, and validates that every referenced action has a registered handler.
-func seedAndLoadCatalog(ctx context.Context, catalogRepo repo.StepCatalogRepo) error {
+func seedAndLoadCatalog(ctx context.Context, catalogRepo repo.StepCatalogRepo, m *observability.Metrics) error {
 	for version, steps := range workflow.BuiltinCatalog() {
 		if err := catalogRepo.EnsureVersion(ctx, version, workflow.StepDefsToDocs(steps)); err != nil {
 			return fmt.Errorf("seed catalog version %d: %w", version, err)
@@ -294,9 +302,15 @@ func seedAndLoadCatalog(ctx context.Context, catalogRepo repo.StepCatalogRepo) e
 	}
 	cache := workflow.CacheFromDocs(docs)
 	if err := cache.ValidateActions(workflow.RegisteredActions()); err != nil {
+		// Readiness-blocking: a catalog version references an action this binary
+		// cannot execute (handlers must ship in the same deploy).
+		slog.Error("catalog action validation failed", "error", err.Error())
 		return err
 	}
 	workflow.UseCatalogCache(cache)
+	if m != nil {
+		m.CatalogCacheVersions.Set(float64(len(cache.Versions())))
+	}
 	return nil
 }
 

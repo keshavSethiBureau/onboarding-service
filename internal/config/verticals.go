@@ -50,7 +50,8 @@ type snapshot struct {
 // questions-per-vertical. Reads are lock-free; reloads swap the snapshot
 // atomically, so a hot-reload never exposes a partially updated view.
 type VerticalCache struct {
-	snap atomic.Pointer[snapshot]
+	snap   atomic.Pointer[snapshot]
+	onMiss func(cache string) // optional; observability hook, set at wiring
 }
 
 // NewVerticalCache returns an empty cache.
@@ -61,6 +62,17 @@ func NewVerticalCache() *VerticalCache {
 		questions: map[string]VerticalQuestions{},
 	})
 	return c
+}
+
+// SetMissHandler installs an optional callback invoked on a lookup miss. Kept as
+// a plain func so this package stays decoupled from the metrics package; wiring
+// points it at onboarding_cache_miss_total.
+func (c *VerticalCache) SetMissHandler(fn func(cache string)) { c.onMiss = fn }
+
+func (c *VerticalCache) reportMiss() {
+	if c.onMiss != nil {
+		c.onMiss("verticals")
+	}
 }
 
 // Replace atomically swaps the cache contents.
@@ -79,15 +91,23 @@ func (c *VerticalCache) Replace(verticals []Vertical, questions []VerticalQuesti
 // Verticals returns all verticals in load order.
 func (c *VerticalCache) Verticals() []Vertical { return c.snap.Load().verticals }
 
-// Vertical returns the vertical with the given name, if present.
+// Vertical returns the vertical with the given name, if present. A miss reports
+// to the observability hook.
 func (c *VerticalCache) Vertical(name string) (Vertical, bool) {
 	v, ok := c.snap.Load().byName[name]
+	if !ok {
+		c.reportMiss()
+	}
 	return v, ok
 }
 
-// Questions returns the question set for a vertical, if present.
+// Questions returns the question set for a vertical, if present. A miss reports
+// to the observability hook.
 func (c *VerticalCache) Questions(name string) (VerticalQuestions, bool) {
 	q, ok := c.snap.Load().questions[name]
+	if !ok {
+		c.reportMiss()
+	}
 	return q, ok
 }
 

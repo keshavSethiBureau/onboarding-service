@@ -3,7 +3,9 @@ package workflow
 import (
 	"context"
 	"log"
+	"time"
 
+	"onboarding-service/internal/observability"
 	"onboarding-service/internal/platform/auth0"
 	"onboarding-service/internal/platform/provisioning"
 	"onboarding-service/internal/repo"
@@ -18,6 +20,7 @@ type Activities struct {
 	orgCreator   auth0.OrgCreator
 	provisioner  provisioning.Provisioner
 	stepEvents   StepEventSink
+	metrics      *observability.Metrics // nil-safe; set via WithMetrics
 }
 
 // NewActivities wires the activities with their dependencies. Step events go
@@ -41,6 +44,13 @@ func NewActivities(
 // WithStepEventSink swaps the analytics sink (tests, future real transport).
 func (a *Activities) WithStepEventSink(s StepEventSink) *Activities {
 	a.stepEvents = s
+	return a
+}
+
+// WithMetrics attaches the observability instruments. Wiring calls this; tests
+// that don't care about metrics leave it nil (all emit sites are nil-safe).
+func (a *Activities) WithMetrics(m *observability.Metrics) *Activities {
+	a.metrics = m
 	return a
 }
 
@@ -70,8 +80,20 @@ func (a *Activities) PersistJourneyState(ctx context.Context, journey dto.Onboar
 
 // EmitStepEvent forwards the analytics step-event to the configured sink (its
 // own activity, its own retry — a sink failure is retried without re-running
-// the step's action).
+// the step's action). It is also the single place the funnel + journey
+// lifecycle counters are emitted: this runs off the deterministic workflow path,
+// once per completed step, so it is where onboarding_step_transitions_total and
+// onboarding_workflow_started/completed belong (the workflow only sets the flags).
 func (a *Activities) EmitStepEvent(ctx context.Context, evt StepEvent) error {
+	if a.metrics != nil {
+		a.metrics.StepTransitions.WithLabelValues(evt.Step, "completed").Inc()
+		if evt.WorkflowStarted {
+			a.metrics.WorkflowStarted.Inc()
+		}
+		if evt.WorkflowCompleted {
+			a.metrics.WorkflowCompleted.Inc()
+		}
+	}
 	return a.stepEvents.Emit(ctx, evt)
 }
 
@@ -166,14 +188,30 @@ func (a *Activities) provision(
 		rec.Resources = map[string]string{}
 	}
 	if _, done := rec.Resources[resource]; done {
-		return ActionResult{}, nil // already provisioned — idempotent
+		return ActionResult{}, nil // already provisioned — idempotent, no external call
 	}
+
+	// Single place provisioning is measured: one external call per resource.
+	start := time.Now()
 	resourceID, err := fn(ctx, provisioning.ProvisionInput{
 		OrgID: in.OrgID, DisplayName: in.DisplayName, Email: in.Email,
 	})
+	status := observability.StatusSuccess
 	if err != nil {
+		status = observability.StatusError
+	}
+	if a.metrics != nil {
+		a.metrics.ProvisioningTotal.WithLabelValues(resource, status).Inc()
+		a.metrics.ProvisioningDuration.WithLabelValues(resource).Observe(time.Since(start).Seconds())
+	}
+	log := observability.Log(ctx).With("resource", resource, "orgId", in.OrgID)
+	if err != nil {
+		// Temporal will retry the activity; surface the scheduled retry.
+		log.Warn("provisioning failed, retry scheduled", "error", err.Error())
 		return ActionResult{}, err
 	}
+	log.Info("provisioning succeeded", "resourceId", resourceID)
+
 	rec.Resources[resource] = resourceID
 	return ActionResult{}, a.provisioning.Upsert(ctx, rec)
 }

@@ -65,6 +65,25 @@ var stepCatalog = map[int][]StepDef{
 	},
 }
 
+// knownSteps is the set of valid step names across the built-in catalog. Used to
+// bucket caller-supplied step values in metric labels so an arbitrary step_name
+// on the internal endpoint can never blow up label cardinality.
+var knownSteps = map[string]bool{
+	StepEmailVerified: true, StepOrganisationCreated: true, StepProvisionKong: true,
+	StepProvisionAWS: true, StepVerticalSelected: true, StepQuestionnaireViewed: true,
+	StepOnboardingCompleted: true, StepProvisionSvix: true, StepProvisionLago: true,
+	StepResourcesProvisioned: true,
+}
+
+// StepLabel returns name if it is a known step, else "unknown" — for safe,
+// low-cardinality metric labelling of externally-supplied step names.
+func StepLabel(name string) string {
+	if knownSteps[name] {
+		return name
+	}
+	return "unknown"
+}
+
 // CatalogSteps returns the ordered step list for a version (nil if unknown),
 // read from the preloaded active catalog.
 func CatalogSteps(version int) []StepDef { return activeCatalog.Steps(version) }
