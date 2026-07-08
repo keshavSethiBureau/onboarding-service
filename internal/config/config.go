@@ -18,18 +18,19 @@ type Config struct {
 	Auth         AuthConfig         `yaml:"auth"`
 	Internal     InternalConfig     `yaml:"internal"`
 	Provisioning ProvisioningConfig `yaml:"provisioning"`
-	AuthService  AuthServiceConfig  `yaml:"authService"`
+	// REMOVED(single-entry): AuthService AuthServiceConfig — this service makes no
+	// calls to the Auth Service, so there is no /me client to configure.
 }
 
-// AuthServiceConfig points at the (existing) Authentication Service. Its /me is
-// called once at signup; /me logic is NEVER reimplemented here. BaseURL empty
-// (local dev) means /me calls fail until configured.
-type AuthServiceConfig struct {
-	BaseURL           string `yaml:"baseUrl"`
-	Attempts          int    `yaml:"attempts"`
-	PerAttemptTimeout string `yaml:"perAttemptTimeout"`
-	Backoff           string `yaml:"backoff"`
-}
+// REMOVED(single-entry): AuthServiceConfig configured the Auth Service /me client,
+// which no longer exists (zero Auth-service calls in any direction).
+//
+// type AuthServiceConfig struct {
+// 	BaseURL           string `yaml:"baseUrl"`
+// 	Attempts          int    `yaml:"attempts"`
+// 	PerAttemptTimeout string `yaml:"perAttemptTimeout"`
+// 	Backoff           string `yaml:"backoff"`
+// }
 
 // ProvisioningConfig holds the post-org provisioning integrations. When the
 // endpoints are empty (local dev) the service falls back to a no-op stub

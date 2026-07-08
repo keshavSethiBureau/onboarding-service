@@ -106,15 +106,27 @@ touches Mongo).
 
 ---
 
-### GET /v1/onboarding/state — current onboarding position — *Auth0 (user)*
+### GET /v1/onboarding/state — journey entry point + current position — *Auth0 (user)*
 
-Returns where the authenticated user is in onboarding so the frontend can route them
-on return. `userId` is taken from the token/dev headers.
+The **single journey entry point**, called on signup and on every login. `userId` is
+taken from the validated token (never the body). Behavior:
+
+- If **no journey exists** for the user, it creates one — starts the workflow
+  (WorkflowID = userId) and records `USER_SIGNED_UP`.
+- If the token's `email_verified` claim is **true** and `EMAIL_VERIFIED` is not yet
+  recorded, it signals `EMAIL_VERIFIED`.
+- Always returns `{ current_step, status }` so the frontend can route the user.
+
+Idempotent: create-if-absent is a no-op when the workflow exists, duplicate step
+signals are no-ops, and a completed journey just returns state. The first-ever call
+may legitimately record both `USER_SIGNED_UP` and `EMAIL_VERIFIED`. This service makes
+**no calls to the Auth Service** — the JWT is validated locally (cached Auth0 JWKS:
+signature, expiry, issuer, audience) by `auth.Middleware`.
 
 **Response `200`**
 ```json
 {
-  "current_step": "EMAIL_VERIFIED",
+  "current_step": "USER_SIGNED_UP",
   "status": "in_progress"
 }
 ```
@@ -213,8 +225,8 @@ token. The Auth Service calls this with `EMAIL_VERIFIED`.
 
 Recorded on the journey read-model and surfaced in `current_step` (`internal/workflow/catalog.go`, catalog v1, ordered):
 
-`EMAIL_VERIFIED` → `ORGANISATION_CREATED` → `PROVISION_KONG` → `PROVISION_AWS` →
-`VERTICAL_SELECTED` → `QUESTIONNAIRE_VIEWED` → `ONBOARDING_COMPLETED` →
+`USER_SIGNED_UP` → `EMAIL_VERIFIED` → `ORGANISATION_CREATED` → `PROVISION_KONG` →
+`PROVISION_AWS` → `VERTICAL_SELECTED` → `ONBOARDING_COMPLETED` →
 `PROVISION_SVIX` → `PROVISION_LAGO` → `RESOURCES_PROVISIONED`.
 
 ### Status values

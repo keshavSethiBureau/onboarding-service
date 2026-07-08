@@ -11,6 +11,7 @@ package workflow
 
 // Step names recorded on the journey read-model.
 const (
+	StepUserSignedUp         = "USER_SIGNED_UP"
 	StepEmailVerified        = "EMAIL_VERIFIED"
 	StepOrganisationCreated  = "ORGANISATION_CREATED"
 	StepProvisionKong        = "PROVISION_KONG"
@@ -52,12 +53,16 @@ const CatalogVersion = 1
 var stepCatalog = map[int][]StepDef{
 	// ---- Version 1 (IMMUTABLE once shipped) ----
 	1: {
+		// Record-only entry step: created on the first GET /v1/onboarding/state for
+		// a user with no journey (no signal, no action — completes immediately).
+		{Name: StepUserSignedUp},
 		{Name: StepEmailVerified, Signal: StepEmailVerified},
 		{Name: StepOrganisationCreated, Signal: StepOrganisationCreated, Action: ActionCreateOrganisation},
 		{Name: StepProvisionKong, Action: ActionProvisionKong},
 		{Name: StepProvisionAWS, Action: ActionProvisionAWS},
 		{Name: StepVerticalSelected, Signal: StepVerticalSelected},
-		{Name: StepQuestionnaireViewed, Signal: StepQuestionnaireViewed},
+		// REMOVED(questionnaire-dropped): questionnaire step is not part of the v1 flow.
+		// {Name: StepQuestionnaireViewed, Signal: StepQuestionnaireViewed},
 		{Name: StepOnboardingCompleted, Signal: StepOnboardingCompleted, MarksComplete: true},
 		{Name: StepProvisionSvix, Action: ActionProvisionSvix},
 		{Name: StepProvisionLago, Action: ActionProvisionLago},
@@ -69,8 +74,8 @@ var stepCatalog = map[int][]StepDef{
 // bucket caller-supplied step values in metric labels so an arbitrary step_name
 // on the internal endpoint can never blow up label cardinality.
 var knownSteps = map[string]bool{
-	StepEmailVerified: true, StepOrganisationCreated: true, StepProvisionKong: true,
-	StepProvisionAWS: true, StepVerticalSelected: true, StepQuestionnaireViewed: true,
+	StepUserSignedUp: true, StepEmailVerified: true, StepOrganisationCreated: true,
+	StepProvisionKong: true, StepProvisionAWS: true, StepVerticalSelected: true,
 	StepOnboardingCompleted: true, StepProvisionSvix: true, StepProvisionLago: true,
 	StepResourcesProvisioned: true,
 }

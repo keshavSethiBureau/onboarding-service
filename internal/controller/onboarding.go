@@ -2,13 +2,15 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"onboarding-service/internal/auth"
-	"onboarding-service/internal/platform/authsvc"
+	// REMOVED(single-entry): "errors" + Auth /me client — signup and the only
+	// Auth-service call were removed; GET /v1/onboarding/state is the sole entry.
+	// "errors"
+	// "onboarding-service/internal/platform/authsvc"
 	"onboarding-service/internal/service/dto"
 	"onboarding-service/pkg/view"
 )
@@ -29,15 +31,16 @@ type stateReader interface {
 
 // OnboardingController serves the authenticated onboarding endpoints.
 type OnboardingController struct {
-	svc      stateReader
-	starter  onboardingStarter
-	meClient authsvc.MeClient
+	svc     stateReader
+	starter onboardingStarter
+	// REMOVED(single-entry): meClient authsvc.MeClient — this service makes no
+	// calls to the Auth Service; /me is never called.
 }
 
-// NewOnboardingController returns a controller backed by the onboarding service,
-// the workflow starter, and the Auth Service /me client (used only at signup).
-func NewOnboardingController(svc stateReader, starter onboardingStarter, meClient authsvc.MeClient) *OnboardingController {
-	return &OnboardingController{svc: svc, starter: starter, meClient: meClient}
+// NewOnboardingController returns a controller backed by the onboarding service
+// and the workflow starter.
+func NewOnboardingController(svc stateReader, starter onboardingStarter) *OnboardingController {
+	return &OnboardingController{svc: svc, starter: starter}
 }
 
 // RegisterRoutes wires the onboarding routes under /v1/onboarding behind the
@@ -47,47 +50,41 @@ func NewOnboardingController(svc stateReader, starter onboardingStarter, meClien
 func (c *OnboardingController) RegisterRoutes(r gin.IRouter, authMW gin.HandlerFunc) {
 	g := r.Group("/v1/onboarding")
 	g.Use(authMW)
-	g.POST("/signup", c.Signup)
+	// REMOVED(single-entry): g.POST("/signup", c.Signup) — GET /state is the sole
+	// journey entry point (create-if-absent); there is no signup endpoint.
 	g.GET("/state", c.GetState)
 	g.POST("/organisation", c.CreateOrganisation)
 	g.POST("/complete", c.Complete)
 }
 
-// Signup is the SIGNUP entry point (POST /v1/onboarding/signup). Order of
-// operations is chosen so a partial failure is safe to retry:
-//  1. identity from the validated token (401 already enforced by middleware);
-//  2. call Auth's /me BEFORE any workflow interaction — if Auth is slow/down it
-//     returns a retryable 503 and NO journey is started (a retry, or the /state
-//     entry, completes cleanly);
-//  3. start the workflow (idempotent), signal EMAIL_VERIFIED if the token says
-//     so, return the journey state.
-func (c *OnboardingController) Signup(ctx *gin.Context) {
-	userID, _, ok := auth.Identity(ctx)
-	if !ok {
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
-		return
-	}
+// REMOVED(single-entry): the POST /v1/onboarding/signup handler and its Auth /me
+// call are gone. GET /v1/onboarding/state is the single journey entry point
+// (create-if-absent), and this service never calls the Auth Service. Kept
+// commented per the removal convention.
+//
+// func (c *OnboardingController) Signup(ctx *gin.Context) {
+// 	userID, _, ok := auth.Identity(ctx)
+// 	if !ok {
+// 		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
+// 		return
+// 	}
+// 	// Confirm the caller against Auth /me before starting anything.
+// 	if _, err := c.meClient.Me(ctx.Request.Context(), ctx.GetHeader("Authorization")); err != nil {
+// 		if errors.Is(err, authsvc.ErrAuthUnavailable) {
+// 			ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth service unavailable, please retry", "retryable": true})
+// 			return
+// 		}
+// 		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "auth rejected the request"})
+// 		return
+// 	}
+// 	c.startAndReturnState(ctx, userID)
+// }
 
-	// Confirm the caller against Auth /me before starting anything. We forward
-	// the caller's bearer token verbatim; /me logic stays in Auth.
-	if _, err := c.meClient.Me(ctx.Request.Context(), ctx.GetHeader("Authorization")); err != nil {
-		if errors.Is(err, authsvc.ErrAuthUnavailable) {
-			// Retryable: no journey was started, so a retry is clean.
-			ctx.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth service unavailable, please retry", "retryable": true})
-			return
-		}
-		// Non-retryable: Auth rejected the token (4xx).
-		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "auth rejected the request"})
-		return
-	}
-
-	c.startAndReturnState(ctx, userID)
-}
-
-// startAndReturnState is the shared core of both entry points: start the
-// per-user workflow (idempotent — one workflow per user even under concurrent
-// calls), signal EMAIL_VERIFIED when the validated token carries it (a no-op if
-// already recorded), then return the journey read-model state.
+// startAndReturnState is the core of the single journey entry point (GET
+// /v1/onboarding/state): start the per-user workflow if absent (idempotent — one
+// workflow per user even under concurrent calls; records USER_SIGNED_UP), signal
+// EMAIL_VERIFIED when the validated token carries it (a no-op if already
+// recorded), then return the journey read-model state.
 func (c *OnboardingController) startAndReturnState(ctx *gin.Context, userID string) {
 	if _, err := c.starter.Start(ctx.Request.Context(), userID); err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start onboarding"})
@@ -160,11 +157,13 @@ func (c *OnboardingController) CreateOrganisation(ctx *gin.Context) {
 	ctx.JSON(http.StatusAccepted, gin.H{"user_id": userID, "run_id": runID})
 }
 
-// GetState is the LOGIN/resume entry point (GET /v1/onboarding/state), called on
-// every login. It starts the workflow if absent (recording the first step),
-// signals EMAIL_VERIFIED when the token carries it, and returns { current_step,
-// status }. Idempotent: safe to call forever — start and signal are no-ops once
-// done. Unlike signup it never calls /me (nothing the journey needs is there).
+// GetState is the SINGLE journey entry point (GET /v1/onboarding/state), called
+// on signup and on every login. If no journey exists for the token's userId it
+// creates one (starts the workflow, records USER_SIGNED_UP); it signals
+// EMAIL_VERIFIED when the token's email_verified claim is true, and returns
+// { current_step, status }. Idempotent: safe to call forever — create-if-absent
+// and duplicate step signals are no-ops; a completed journey just returns state.
+// This service never calls the Auth Service.
 func (c *OnboardingController) GetState(ctx *gin.Context) {
 	userID, _, ok := auth.Identity(ctx)
 	if !ok {

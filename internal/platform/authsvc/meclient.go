@@ -1,9 +1,10 @@
-// Package authsvc is a thin client for the Authentication Service's existing
-// endpoints. It NEVER reimplements Auth logic — it only calls it. Today it wraps
-// GET /me, used once at signup to confirm the caller against Auth before the
-// onboarding journey starts.
+// REMOVED(single-entry): the entire Auth /me client is dead. This service makes
+// ZERO calls to the Auth Service in any direction — /me is never called, proxied
+// or reimplemented. The implementation is retained (commented) per the removal
+// convention; nothing imports this package.
 package authsvc
 
+/*
 import (
 	"context"
 	"errors"
@@ -129,3 +130,4 @@ func (c *HTTPMeClient) Me(ctx context.Context, bearerToken string) (*MeInfo, err
 	}
 	return nil, fmt.Errorf("%w: %v", ErrAuthUnavailable, last)
 }
+*/

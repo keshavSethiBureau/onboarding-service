@@ -54,7 +54,8 @@ func driveAllSignals(t *testing.T, starter *Starter, client interface {
 		t.Fatalf("ORGANISATION_CREATED: %v", err)
 	}
 	_ = client.SignalWorkflow(ctx, userID, "", StepVerticalSelected, SignalPayload{VerticalName: "KYC"})
-	_ = client.SignalWorkflow(ctx, userID, "", StepQuestionnaireViewed, SignalPayload{})
+	// REMOVED(questionnaire-dropped): QUESTIONNAIRE_VIEWED is no longer in the v1 catalog.
+	// _ = client.SignalWorkflow(ctx, userID, "", StepQuestionnaireViewed, SignalPayload{})
 	if _, err := starter.RequestComplete(ctx, userID); err != nil {
 		t.Fatalf("ONBOARDING_COMPLETED: %v", err)
 	}

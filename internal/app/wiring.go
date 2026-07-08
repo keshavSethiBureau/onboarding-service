@@ -34,7 +34,7 @@ import (
 	"onboarding-service/internal/controller"
 	"onboarding-service/internal/observability"
 	"onboarding-service/internal/platform/auth0"
-	"onboarding-service/internal/platform/authsvc"
+	// REMOVED(single-entry): "onboarding-service/internal/platform/authsvc" — no /me client.
 	"onboarding-service/internal/platform/provisioning"
 	"onboarding-service/internal/repo"
 	mongorepo "onboarding-service/internal/repo/mongo"
@@ -230,16 +230,18 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init auth: %w", err)
 	}
-	meClient, err := authsvc.NewHTTPMeClient(authsvc.Settings{
-		BaseURL:           cfg.AuthService.BaseURL,
-		Attempts:          cfg.AuthService.Attempts,
-		PerAttemptTimeout: parseDurationOr(cfg.AuthService.PerAttemptTimeout, 2*time.Second),
-		Backoff:           parseDurationOr(cfg.AuthService.Backoff, 200*time.Millisecond),
-	}, registry)
-	if err != nil {
-		return nil, fmt.Errorf("failed to init auth /me client: %w", err)
-	}
-	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter, meClient)
+	// REMOVED(single-entry): the Auth /me client is gone — this service makes zero
+	// calls to the Auth Service. GET /v1/onboarding/state is the single entry point.
+	// meClient, err := authsvc.NewHTTPMeClient(authsvc.Settings{
+	// 	BaseURL:           cfg.AuthService.BaseURL,
+	// 	Attempts:          cfg.AuthService.Attempts,
+	// 	PerAttemptTimeout: parseDurationOr(cfg.AuthService.PerAttemptTimeout, 2*time.Second),
+	// 	Backoff:           parseDurationOr(cfg.AuthService.Backoff, 200*time.Millisecond),
+	// }, registry)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to init auth /me client: %w", err)
+	// }
+	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter)
 
 	// internal endpoint (Auth Service only) — starts/signals the workflow.
 	internalCtrl := controller.NewInternalOnboardingController(starter, obsMetrics)
@@ -274,18 +276,19 @@ func Wire() (*Container, error) {
 	}, nil
 }
 
-// parseDurationOr parses a duration string, returning fallback when empty or
-// invalid (config supplies these as ${VAR:default} strings).
-func parseDurationOr(s string, fallback time.Duration) time.Duration {
-	if s == "" {
-		return fallback
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return fallback
-	}
-	return d
-}
+// REMOVED(single-entry): parseDurationOr only served the Auth /me client config,
+// which is gone.
+//
+// func parseDurationOr(s string, fallback time.Duration) time.Duration {
+// 	if s == "" {
+// 		return fallback
+// 	}
+// 	d, err := time.ParseDuration(s)
+// 	if err != nil {
+// 		return fallback
+// 	}
+// 	return d
+// }
 
 // seedAndLoadCatalog seeds the deployed baseline catalog versions (idempotent),
 // preloads all versions from the durable collection into the workflow's active

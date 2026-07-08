@@ -87,6 +87,16 @@ func TestWorkflow_EmitsOneEventPerStep(t *testing.T) {
 	if len(sink.events) != len(steps) {
 		t.Fatalf("sink received %d events, want exactly %d (one per step)", len(sink.events), len(steps))
 	}
+	// The org id is produced by the ORGANISATION_CREATED step; every event from
+	// that step onward must carry it, earlier ones must not (derive the index so
+	// this stays correct as the catalog changes).
+	orgStepIdx := len(steps)
+	for i, s := range steps {
+		if s.Name == StepOrganisationCreated {
+			orgStepIdx = i
+			break
+		}
+	}
 	var gotSteps, wantSteps []string
 	for i, evt := range sink.events {
 		gotSteps = append(gotSteps, evt.Step)
@@ -97,9 +107,7 @@ func TestWorkflow_EmitsOneEventPerStep(t *testing.T) {
 		if evt.Timestamp.IsZero() {
 			t.Errorf("event %d (%s) has zero timestamp", i, evt.Step)
 		}
-		// countingOrgCreator returns "org_u1" at ORGANISATION_CREATED (index 1);
-		// every event from then on must carry it, the ones before must not.
-		if wantOrg := i >= 1; (evt.OrgID == "org_u1") != wantOrg {
+		if wantOrg := i >= orgStepIdx; (evt.OrgID == "org_u1") != wantOrg {
 			t.Errorf("event %d (%s) orgId = %q, want populated=%v", i, evt.Step, evt.OrgID, wantOrg)
 		}
 	}

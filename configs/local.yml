@@ -32,13 +32,13 @@ auth:
 internal:
   authToken: ""
 
-# Authentication Service /me (signup entry calls it once). Empty baseUrl locally
-# => /me calls fail; use the GET /v1/onboarding/state entry instead when unset.
-authService:
-  baseUrl: ""
-  attempts: 3
-  perAttemptTimeout: 2s
-  backoff: 200ms
+# REMOVED(single-entry): the Auth Service /me client was removed — this service
+# makes zero calls to the Auth Service. GET /v1/onboarding/state is the sole entry.
+# authService:
+#   baseUrl: ""
+#   attempts: 3
+#   perAttemptTimeout: 2s
+#   backoff: 200ms
 
 # Post-org provisioning. Empty base URLs => the no-op stub provisioner is used
 # locally (no external Svix/Lago/Kong/AWS reachable).

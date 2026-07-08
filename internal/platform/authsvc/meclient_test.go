@@ -1,5 +1,9 @@
 package authsvc
 
+// REMOVED(single-entry): tests for the dead Auth /me client. The client is no
+// longer used (this service never calls the Auth Service); retained commented
+// per the removal convention.
+/*
 import (
 	"context"
 	"errors"
@@ -95,3 +99,4 @@ func TestMe_4xxNotRetried(t *testing.T) {
 		t.Errorf("server hits = %d, want 1 (no retry on 4xx)", got)
 	}
 }
+*/

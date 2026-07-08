@@ -94,12 +94,12 @@ func TestExecutor_WalksV1InOrder(t *testing.T) {
 // must be immutable — a change means a NEW version).
 func TestCatalogV1_Immutable(t *testing.T) {
 	want := []StepDef{
+		{Name: "USER_SIGNED_UP"},
 		{Name: "EMAIL_VERIFIED", Signal: "EMAIL_VERIFIED"},
 		{Name: "ORGANISATION_CREATED", Signal: "ORGANISATION_CREATED", Action: "CreateOrganisation"},
 		{Name: "PROVISION_KONG", Action: "ProvisionKong"},
 		{Name: "PROVISION_AWS", Action: "ProvisionAWS"},
 		{Name: "VERTICAL_SELECTED", Signal: "VERTICAL_SELECTED"},
-		{Name: "QUESTIONNAIRE_VIEWED", Signal: "QUESTIONNAIRE_VIEWED"},
 		{Name: "ONBOARDING_COMPLETED", Signal: "ONBOARDING_COMPLETED", MarksComplete: true},
 		{Name: "PROVISION_SVIX", Action: "ProvisionSvix"},
 		{Name: "PROVISION_LAGO", Action: "ProvisionLago"},

@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -12,7 +11,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"onboarding-service/internal/auth"
-	"onboarding-service/internal/platform/authsvc"
 	"onboarding-service/internal/service/dto"
 	"onboarding-service/internal/workflow"
 )
@@ -20,8 +18,8 @@ import (
 // fakeBackend is a shared in-memory stand-in for the workflow + read-model. It
 // models the two invariants under test: (1) one workflow per user — Start
 // "creates" a journey at most once per userId even under concurrency; (2) the
-// EMAIL_VERIFIED signal advances the first step. GetState reads the same store,
-// standing in for the PersistJourneyState-maintained read-model.
+// EMAIL_VERIFIED signal advances past the recorded first step. GetState reads the
+// same store, standing in for the PersistJourneyState-maintained read-model.
 type fakeBackend struct {
 	mu            sync.Mutex
 	creates       map[string]int  // userId -> number of times Start actually created
@@ -62,39 +60,21 @@ func (f *fakeBackend) RequestOrganisation(context.Context, string, string, strin
 }
 func (f *fakeBackend) RequestComplete(context.Context, string) (string, error) { return "run", nil }
 
-// GetState mirrors the executor: first step is EMAIL_VERIFIED; once signalled the
-// journey advances to ORGANISATION_CREATED. A never-started user reports the
-// first step (matching the service's synthetic fallback).
+// GetState mirrors the executor: a freshly created journey rests on the recorded
+// entry step USER_SIGNED_UP; once EMAIL_VERIFIED is signalled the journey advances.
 func (f *fakeBackend) GetState(_ context.Context, userID string) (*dto.OnboardingJourney, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	step := workflow.StepEmailVerified
+	step := workflow.StepUserSignedUp
 	if f.emailVerified[userID] {
-		step = workflow.StepOrganisationCreated
+		step = workflow.StepEmailVerified
 	}
 	return &dto.OnboardingJourney{UserID: userID, CurrentStep: step, Status: dto.StatusInProgress}, nil
 }
 
-// fakeMe is a configurable /me client.
-type fakeMe struct {
-	err   error
-	calls int
-	mu    sync.Mutex
-}
-
-func (m *fakeMe) Me(context.Context, string) (*authsvc.MeInfo, error) {
-	m.mu.Lock()
-	m.calls++
-	m.mu.Unlock()
-	if m.err != nil {
-		return nil, m.err
-	}
-	return &authsvc.MeInfo{}, nil
-}
-
 // newTestRouter builds a gin engine with the REAL auth middleware in dev mode
 // (identity from X-User-Id / X-Email-Verified headers) and the onboarding routes.
-func newTestRouter(t *testing.T, be *fakeBackend, me authsvc.MeClient) *gin.Engine {
+func newTestRouter(t *testing.T, be *fakeBackend) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	mw, err := auth.New(auth.Config{Enabled: false})
@@ -102,7 +82,7 @@ func newTestRouter(t *testing.T, be *fakeBackend, me authsvc.MeClient) *gin.Engi
 		t.Fatalf("auth.New: %v", err)
 	}
 	r := gin.New()
-	ctrl := NewOnboardingController(be, be, me)
+	ctrl := NewOnboardingController(be, be)
 	ctrl.RegisterRoutes(r, mw.Handler())
 	return r
 }
@@ -130,45 +110,38 @@ func decodeState(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	return body
 }
 
-//  1. First call for a new user starts the workflow, records the first step, and
-//     the returned state reflects it.
-func TestEntryPoint_FirstCall_StartsWorkflow(t *testing.T) {
-	for _, tc := range []struct{ name, method, path string }{
-		{"signup", http.MethodPost, "/v1/onboarding/signup"},
-		{"state", http.MethodGet, "/v1/onboarding/state"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			be := newFakeBackend()
-			r := newTestRouter(t, be, &fakeMe{})
+//  1. First /state call for a new user creates the journey and records
+//     USER_SIGNED_UP; the returned state reflects it.
+func TestState_FirstCall_CreatesJourneyAtUserSignedUp(t *testing.T) {
+	be := newFakeBackend()
+	r := newTestRouter(t, be)
 
-			w := do(r, tc.method, tc.path, "user1", "")
-			if w.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
-			}
-			if be.creates["user1"] != 1 {
-				t.Errorf("workflow creates = %d, want 1", be.creates["user1"])
-			}
-			if got := decodeState(t, w)["current_step"]; got != workflow.StepEmailVerified {
-				t.Errorf("current_step = %v, want EMAIL_VERIFIED (first step recorded)", got)
-			}
-		})
+	w := do(r, http.MethodGet, "/v1/onboarding/state", "user1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if be.creates["user1"] != 1 {
+		t.Errorf("workflow creates = %d, want 1", be.creates["user1"])
+	}
+	if got := decodeState(t, w)["current_step"]; got != workflow.StepUserSignedUp {
+		t.Errorf("current_step = %v, want USER_SIGNED_UP (entry step recorded)", got)
 	}
 }
 
 // 2. A verified-email token advances EMAIL_VERIFIED; an unverified one does not.
-func TestEntryPoint_EmailVerifiedAdvances(t *testing.T) {
+func TestState_EmailVerifiedAdvances(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		verifiedHdr string
 		wantSignal  int
 		wantStep    string
 	}{
-		{"verified advances", "true", 1, workflow.StepOrganisationCreated},
-		{"unverified does not", "", 0, workflow.StepEmailVerified},
+		{"verified advances", "true", 1, workflow.StepEmailVerified},
+		{"unverified does not", "", 0, workflow.StepUserSignedUp},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			be := newFakeBackend()
-			r := newTestRouter(t, be, &fakeMe{})
+			r := newTestRouter(t, be)
 
 			w := do(r, http.MethodGet, "/v1/onboarding/state", "user1", tc.verifiedHdr)
 			if w.Code != http.StatusOK {
@@ -185,9 +158,9 @@ func TestEntryPoint_EmailVerifiedAdvances(t *testing.T) {
 }
 
 // 3. Repeated calls are no-ops: no duplicate journey, state unchanged.
-func TestEntryPoint_RepeatedCallsNoOp(t *testing.T) {
+func TestState_RepeatedCallsNoOp(t *testing.T) {
 	be := newFakeBackend()
-	r := newTestRouter(t, be, &fakeMe{})
+	r := newTestRouter(t, be)
 
 	var last string
 	for i := 0; i < 5; i++ {
@@ -206,10 +179,10 @@ func TestEntryPoint_RepeatedCallsNoOp(t *testing.T) {
 	}
 }
 
-// 4. Two (many) concurrent calls for the same user yield exactly one workflow.
-func TestEntryPoint_ConcurrentSingleWorkflow(t *testing.T) {
+// 4. Two (many) concurrent first calls for the same user yield exactly one journey.
+func TestState_ConcurrentSingleWorkflow(t *testing.T) {
 	be := newFakeBackend()
-	r := newTestRouter(t, be, &fakeMe{})
+	r := newTestRouter(t, be)
 
 	const n = 16
 	var wg sync.WaitGroup
@@ -231,37 +204,27 @@ func TestEntryPoint_ConcurrentSingleWorkflow(t *testing.T) {
 }
 
 // 5. An invalid/missing token is rejected with 401 BEFORE any workflow call.
-func TestEntryPoint_Unauthenticated401BeforeWorkflow(t *testing.T) {
-	for _, tc := range []struct{ name, method, path string }{
-		{"signup", http.MethodPost, "/v1/onboarding/signup"},
-		{"state", http.MethodGet, "/v1/onboarding/state"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			be := newFakeBackend()
-			me := &fakeMe{}
-			r := newTestRouter(t, be, me)
+func TestState_Unauthenticated401BeforeWorkflow(t *testing.T) {
+	be := newFakeBackend()
+	r := newTestRouter(t, be)
 
-			w := do(r, tc.method, tc.path, "", "") // no X-User-Id -> middleware 401
-			if w.Code != http.StatusUnauthorized {
-				t.Fatalf("status = %d, want 401", w.Code)
-			}
-			if len(be.creates) != 0 {
-				t.Errorf("workflow was started for an unauthenticated caller: %v", be.creates)
-			}
-			if me.calls != 0 {
-				t.Errorf("/me was called for an unauthenticated caller: %d", me.calls)
-			}
-		})
+	w := do(r, http.MethodGet, "/v1/onboarding/state", "", "") // no X-User-Id -> middleware 401
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if len(be.creates) != 0 {
+		t.Errorf("workflow was started for an unauthenticated caller: %v", be.creates)
 	}
 }
 
-//  6. A /me timeout/failure returns a retryable error and leaves NO partial
-//     journey (signup calls /me before touching the workflow).
+// REMOVED(single-entry): signup + Auth /me tests. There is no signup endpoint and
+// this service never calls the Auth Service, so these no longer apply. Retained
+// commented per the removal convention.
+/*
 func TestSignup_MeUnavailable_RetryableNoJourney(t *testing.T) {
 	be := newFakeBackend()
 	me := &fakeMe{err: authsvc.ErrAuthUnavailable}
 	r := newTestRouter(t, be, me)
-
 	w := do(r, http.MethodPost, "/v1/onboarding/signup", "user1", "true")
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 (retryable)", w.Code)
@@ -272,17 +235,12 @@ func TestSignup_MeUnavailable_RetryableNoJourney(t *testing.T) {
 	if len(be.creates) != 0 || len(be.started) != 0 {
 		t.Errorf("a partial journey was started despite /me failure: creates=%v started=%v", be.creates, be.started)
 	}
-	if be.signalCalls["user1"] != 0 {
-		t.Errorf("EMAIL_VERIFIED signalled despite /me failure: %d", be.signalCalls["user1"])
-	}
 }
 
-// A /me rejection (4xx, non-retryable) is surfaced as 401, still no journey.
 func TestSignup_MeRejected_401NoJourney(t *testing.T) {
 	be := newFakeBackend()
 	me := &fakeMe{err: errors.New("auth /me rejected the request (status 403)")}
 	r := newTestRouter(t, be, me)
-
 	w := do(r, http.MethodPost, "/v1/onboarding/signup", "user1", "true")
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", w.Code)
@@ -291,3 +249,4 @@ func TestSignup_MeRejected_401NoJourney(t *testing.T) {
 		t.Errorf("a journey was started despite /me rejection: %v", be.creates)
 	}
 }
+*/
