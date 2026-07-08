@@ -2,8 +2,9 @@ package workflow
 
 import (
 	"context"
-	"log"
 	"time"
+
+	"onboarding-service/internal/observability"
 )
 
 // StepEvent is the lightweight analytics event emitted on every step
@@ -30,9 +31,10 @@ type StepEventSink interface {
 // LogStepEventSink is the placeholder sink: it logs the event and succeeds.
 type LogStepEventSink struct{}
 
-// Emit logs the step event.
-func (LogStepEventSink) Emit(_ context.Context, evt StepEvent) error {
-	log.Printf("analytics: step-event user=%s org=%s step=%s at=%s",
-		evt.UserID, evt.OrgID, evt.Step, evt.Timestamp.UTC().Format(time.RFC3339))
+// Emit logs the step event as a structured, trace-correlated line.
+func (LogStepEventSink) Emit(ctx context.Context, evt StepEvent) error {
+	observability.Log(ctx).Info("analytics step-event",
+		"userId", evt.UserID, "orgId", evt.OrgID, "step", evt.Step,
+		"at", evt.Timestamp.UTC().Format(time.RFC3339))
 	return nil
 }

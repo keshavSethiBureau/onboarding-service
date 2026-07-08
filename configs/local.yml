@@ -5,6 +5,10 @@ server:
   port: "8080"
 environment: local
 
+# Structured (JSON) logging. Level: debug|info|warn|error.
+log:
+  level: info
+
 # OpenTelemetry (bureau-commons-go/telemetry)
 telemetry:
   serviceName: onboarding-service

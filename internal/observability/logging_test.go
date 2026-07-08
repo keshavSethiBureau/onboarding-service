@@ -47,6 +47,50 @@ func TestLog_CorrelatesTraceID(t *testing.T) {
 	t.Logf("---- step-transition log line ----\n%s", buf.String())
 }
 
+// TestNewJSONHandler_LevelFiltering proves the configured level gates output and
+// the format is structured JSON: at "warn", Info is suppressed and Warn is
+// emitted; at "info", Info appears.
+func TestNewJSONHandler_LevelFiltering(t *testing.T) {
+	t.Run("warn suppresses info, emits warn as JSON", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(NewJSONHandler(&buf, "warn"))
+
+		logger.Info("should be dropped")
+		if buf.Len() != 0 {
+			t.Errorf("info emitted at warn level: %s", buf.String())
+		}
+
+		logger.Warn("kept", "k", "v")
+		var line map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+			t.Fatalf("warn line not JSON: %v (%q)", err, buf.String())
+		}
+		if line["level"] != "WARN" || line["msg"] != "kept" || line["k"] != "v" {
+			t.Errorf("unexpected warn line: %v", line)
+		}
+	})
+
+	t.Run("info level emits info", func(t *testing.T) {
+		var buf bytes.Buffer
+		slog.New(NewJSONHandler(&buf, "info")).Info("hello")
+		var line map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &line); err != nil {
+			t.Fatalf("info line not JSON: %v (%q)", err, buf.String())
+		}
+		if line["level"] != "INFO" || line["msg"] != "hello" {
+			t.Errorf("unexpected info line: %v", line)
+		}
+	})
+
+	t.Run("unknown level defaults to info", func(t *testing.T) {
+		var buf bytes.Buffer
+		slog.New(NewJSONHandler(&buf, "bogus")).Info("shown")
+		if buf.Len() == 0 {
+			t.Error("unknown level should default to info (info shown), got nothing")
+		}
+	})
+}
+
 // TestLog_NoSpanNoTraceID: without a span, no trace_id is attached (no crash).
 func TestLog_NoSpanNoTraceID(t *testing.T) {
 	var buf bytes.Buffer

@@ -3,7 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 
@@ -147,7 +147,7 @@ func LoadVerticalCache(src verticalSource) (*VerticalCache, error) {
 	}
 	src.OnKeyChange("^("+KeyVerticals+"|"+KeyQuestions+")$", func(_, _, _ string) {
 		if err := reloadVerticalCache(cache, src); err != nil {
-			log.Printf("vertical cache hot-reload failed, keeping previous snapshot: %v", err)
+			slog.Warn("vertical cache hot-reload failed, keeping previous snapshot", "error", err.Error())
 		}
 	})
 	return cache, nil

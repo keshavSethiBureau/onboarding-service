@@ -13,6 +13,7 @@ type Config struct {
 		Port string `yaml:"port"`
 	} `yaml:"server"`
 	Environment  string             `yaml:"environment"`
+	Log          LogConfig          `yaml:"log"`
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
 	Apollo       ApolloConfig       `yaml:"apollo"`
 	Auth         AuthConfig         `yaml:"auth"`
@@ -82,6 +83,12 @@ type Auth0ManagementConfig struct {
 	UsernamePasswordConnectionID string `yaml:"usernamePasswordConnectionId"`
 	SSOConnectionID              string `yaml:"ssoConnectionId"`
 	OwnerRoleID                  string `yaml:"ownerRoleId"`
+}
+
+// LogConfig controls the structured (JSON) slog logger. Level is one of
+// debug|info|warn|error (default info); typically set via ${LOG_LEVEL}.
+type LogConfig struct {
+	Level string `yaml:"level"`
 }
 
 // TelemetryConfig holds OpenTelemetry settings consumed by commons telemetry.

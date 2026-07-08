@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"onboarding-service/internal/observability"
@@ -121,7 +120,7 @@ func (a *Activities) CreateOrganisation(ctx context.Context, in ActionInput) (Ac
 	// org creation — Lago tolerates an empty email.
 	email, err := a.orgCreator.UserEmail(ctx, in.UserID)
 	if err != nil {
-		log.Printf("CreateOrganisation: user email lookup failed for %s: %v", in.UserID, err)
+		observability.Log(ctx).Warn("user email lookup failed", "userId", in.UserID, "error", err.Error())
 	}
 	return ActionResult{OrgID: orgID, Email: email}, nil
 }

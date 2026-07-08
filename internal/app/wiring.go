@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -88,6 +87,10 @@ func Wire() (*Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
+
+	// logging (structured JSON, leveled) — install before any other logging so all
+	// subsequent slog.* / observability.Log(ctx) output is leveled + correlated.
+	observability.InitLogger(cfg.Log.Level)
 
 	// telemetry (OpenTelemetry) — global tracer provider + propagator. The OTLP
 	// exporter batches in the background, so this succeeds even with no collector.
@@ -322,7 +325,7 @@ func Run(c *Container) error {
 			serverErr <- err
 		}
 	}()
-	log.Printf("server starting on %s", addr)
+	slog.Info("server starting", "addr", addr)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -331,11 +334,11 @@ func Run(c *Container) error {
 	case err := <-serverErr:
 		return err
 	case <-sigCh:
-		log.Println("shutdown signal received, draining in-flight requests")
+		slog.Info("shutdown signal received, draining in-flight requests")
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Printf("graceful shutdown timed out: %v", err)
+			slog.Warn("graceful shutdown timed out", "error", err.Error())
 		}
 		return c.Close()
 	}
