@@ -93,6 +93,18 @@ func StepLabel(name string) string {
 // read from the preloaded active catalog.
 func CatalogSteps(version int) []StepDef { return activeCatalog.Steps(version) }
 
+// StepInCatalog reports whether name is a step in the given catalog version. The
+// generic step endpoint uses it (in one place) to reject steps not in the
+// caller's pinned catalog version.
+func StepInCatalog(version int, name string) bool {
+	for _, s := range activeCatalog.Steps(version) {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // LatestCatalogVersion is max(version) in the preloaded catalog. New journeys
 // pin this at workflow start; the pin never changes for the journey's life.
 func LatestCatalogVersion() int { return activeCatalog.LatestVersion() }

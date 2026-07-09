@@ -247,27 +247,55 @@ type Question struct {
 
 ### Public (`/v1`, Auth0 token required; identity from token)
 ```
-POST /v1/onboarding/organisation  frontend calls this to create the org (Go calls Auth0);
-                                   starts the workflow and records ORGANISATION_CREATED
 GET  /v1/onboarding/state          THE JOURNEY ENTRY POINT + resume. If no journey
                                     exists, creates the workflow and records
                                     USER_SIGNED_UP; reads email_verified from the JWT
                                     and signals EMAIL_VERIFIED when true; returns
                                     { current_step, status }. Idempotent on every call.
+POST /v1/onboarding/steps/{step_name}
+                                    GENERIC, catalog-driven step advance — the SINGLE
+                                    write path for user-input steps. Body { "input": {…} }
+                                    (opaque per-step fields). userId from the token, never
+                                    the body. Advances {step_name} iff it is in the user's
+                                    PINNED catalog version AND is the current step (else
+                                    409); runs the step's registered validator on
+                                    body.input (400 on failure; skipped if the step has no
+                                    validator); signals the step's channel with the
+                                    validated input; the step's activity performs the side
+                                    effect. Idempotent: re-submitting a completed step is a
+                                    no-op returning current state; a completed journey just
+                                    returns state. Returns { current_step, status }.
 GET  /v1/verticals                 list active verticals (from cache)
-POST /v1/onboarding/vertical       body { vertical_name }; signals VerticalSelected
 GET  /v1/onboarding/questionnaire  questions for the journey's vertical (from cache)
-POST /v1/onboarding/complete       signals Complete to the workflow
 ```
 
-There are NO internal endpoints for the Authentication Service — it does not call
-this service, and /me stays in Auth unchanged. The journey starts and advances from
-`/v1/onboarding/state` (token claims) and the public endpoints below.
+Retired (RETIRED(generic-steps)) — folded into the generic step-advance path above;
+only the TRIGGER changes (typed endpoint → step signal), the step catalog contents, the
+step activities, and end-of-workflow provisioning behaviour are all unchanged:
+- `POST /v1/onboarding/organisation` → `POST /v1/onboarding/steps/ORGANISATION_CREATED`
+  with `{ "input": { "display_name": "...", "tnc_accepted": "..." } }`.
+- `POST /v1/onboarding/complete` → `POST /v1/onboarding/steps/ONBOARDING_COMPLETED` (no input).
+- `POST /v1/onboarding/vertical` → `POST /v1/onboarding/steps/VERTICAL_SELECTED`
+  with `{ "input": { "vertical_name": "..." } }`.
 
-The frontend's org-creation call moves from the Auth Service to
-`POST /v1/onboarding/organisation` on the Go service. Public write endpoints
-translate to Temporal signals/activities. Verticals/questions refresh via Apollo
-hot-reload, not an endpoint.
+The internal steps endpoint (`POST /v1/internal/onboarding/steps`, Auth handoff) and
+`/me` staying in Auth are unchanged. The journey starts at `/v1/onboarding/state`
+(token claims) and every user-input step advances through the single generic endpoint
+above. Verticals/questions refresh via Apollo hot-reload, not an endpoint.
+
+### 7.1 Generic step-advance endpoint (single write path)
+
+- **User-input steps advance via `POST /v1/onboarding/steps/{step_name}`** (generic,
+  catalog-driven; payload in `body.input`). Only `GET /v1/onboarding/state` and the
+  internal steps endpoint are separate entry points.
+- **Adding a user-input step = catalog data + a step activity + (if it has input) a
+  registered validator. NEVER a new controller.**
+- **Per-step input validation lives in a validator registry** (step name → validate
+  function) that the generic endpoint looks up — not in per-step controllers and not
+  scattered inside activities. Steps with no user input need no validator.
+- **The generic endpoint enforces, in ONE place,** that `{step_name}` is in the user's
+  pinned catalog version and is the current step (reject out-of-order with 409), and is
+  idempotent (re-submitting a completed step returns state).
 
 ## 8. Critical flows
 
@@ -288,7 +316,7 @@ call advances the step.
 
 ### Provisioning (end of workflow)
 ```
-Complete signal
+Complete signal (via POST /v1/onboarding/steps/ONBOARDING_COMPLETED)
   -> workflow marks journey completed (PersistJourneyState); user proceeds to homepage
   -> ProvisionSvix activity (retry policy, idempotent by orgId)
   -> ProvisionLago activity (retry policy, idempotent by orgId)

@@ -24,11 +24,13 @@ type WorkflowInput struct {
 }
 
 // SignalPayload is the (typed, so replay stays deterministic — no map iteration)
-// data a user-driven step's signal may carry.
+// data a user-driven step's signal may carry. Its json tags are snake_case so the
+// generic step endpoint can decode the request's opaque body.input straight into
+// it without any per-step field handling.
 type SignalPayload struct {
-	DisplayName  string `json:"displayName"`
-	VerticalName string `json:"verticalName"`
-	TncAccepted  string `json:"tncAccepted"`
+	DisplayName  string `json:"display_name"`
+	VerticalName string `json:"vertical_name"`
+	TncAccepted  string `json:"tnc_accepted"`
 }
 
 // Register wires the workflow and activities onto a Temporal worker. Every

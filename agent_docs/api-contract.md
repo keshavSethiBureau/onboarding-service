@@ -140,50 +140,50 @@ signature, expiry, issuer, audience) by `auth.Middleware`.
 
 ---
 
-### POST /v1/onboarding/organisation — create organisation — *Auth0 (user)*
+### POST /v1/onboarding/steps/{step_name} — advance a user-input step — *Auth0 (user)*
 
-Triggers organisation creation for the authenticated user. Starts the onboarding
-workflow if absent (WorkflowID = userId), calls Auth0 via the `CreateOrganisation`
-activity, and records `ORGANISATION_CREATED`. Asynchronous: returns `202` immediately;
-the resulting `orgId` later lands on the journey read-model (poll `GET
-/v1/onboarding/state`).
+The **single write path** for user-input steps: one generic, catalog-driven handler
+serves every user-advanceable step. `userId` comes from the validated token, never the
+body.
+
+**Path**
+- `{step_name}` — the step to advance (e.g. `ORGANISATION_CREATED`, `VERTICAL_SELECTED`,
+  `ONBOARDING_COMPLETED`). Must be in the caller's pinned catalog version **and** be
+  their current step.
 
 **Request**
 ```json
-{ "display_name": "Acme Inc" }
+{ "input": { "display_name": "Acme Inc", "tnc_accepted": "true" } }
 ```
-- `display_name` — **required**, non-empty. The `userId` comes from the token, never
-  the body.
+- `input` — an object of step-scoped fields, **opaque** to the generic handler. What it
+  must contain is defined by the step's registered validator (below). A step with no user
+  input (e.g. `ONBOARDING_COMPLETED`) takes `{ "input": {} }` or an empty body.
 
-**Response `202`**
+**Behavior**
+1. **Ordering guard (one place):** `409` if `{step_name}` is not in the pinned catalog or
+   is not the current step. A step already completed is a no-op returning current state.
+2. **Validator registry lookup:** if the step has a registered validator, validate
+   `input` (`400` on failure); if it has none, skip.
+3. **Signal** the workflow's channel for `{step_name}` with the validated input; the
+   step's activity performs the side effect (e.g. `CreateOrganisation`).
+4. **Idempotent:** re-submitting a completed step is a no-op (Temporal ignores a
+   duplicate signal for a step already passed).
+
+**Registered validators (current)**
+- `ORGANISATION_CREATED` — `display_name` non-empty **and** `tnc_accepted` non-empty.
+- `VERTICAL_SELECTED` — `vertical_name` must exist in the vertical cache.
+- `ONBOARDING_COMPLETED` — none (pure acknowledge-and-advance).
+
+**Response `200`** (same shape as `/state`)
 ```json
-{ "user_id": "auth0|123", "run_id": "<temporal-run-id>" }
+{ "current_step": "PROVISION_KONG", "status": "in_progress" }
 ```
 
 **Errors**
-- `400 { "error": "display_name is required" }` — missing/empty body or `display_name`.
+- `400 { "error": "<validation message>" }` — `body.input` failed the step's validator.
+- `409 { "error": "step not current" }` — out-of-order, or step not in the pinned catalog.
 - `401` — unauthenticated.
-- `500 { "error": "failed to request organisation creation" }`.
-
----
-
-### POST /v1/onboarding/complete — finish onboarding — *Auth0 (user)*
-
-Signals the workflow to finish onboarding. Returns `202` immediately, before
-end-of-onboarding provisioning (Svix + Lago) runs — the workflow marks the journey
-completed so the user proceeds to the homepage, then provisions independently. A
-provisioning failure never blocks this response. No request body.
-
-**Request** — none.
-
-**Response `202`**
-```json
-{ "user_id": "auth0|123", "run_id": "<temporal-run-id>" }
-```
-
-**Errors**
-- `401` — unauthenticated.
-- `500 { "error": "failed to complete onboarding" }`.
+- `500 { "error": "failed to advance step" }`.
 
 ---
 
@@ -238,3 +238,27 @@ Recorded on the journey read-model and surfaced in `current_step` (`internal/wor
 - All errors use the shape `{ "error": "<message>" }`.
 - `202 Accepted` responses carry `run_id` (the Temporal workflow run id) so callers
   can correlate the async work; poll `GET /v1/onboarding/state` for the outcome.
+
+---
+
+## Retired endpoints
+
+RETIRED(generic-steps): the two typed write endpoints below are retired in favour of
+`POST /v1/onboarding/steps/{step_name}`. Their behaviour is unchanged — only the trigger
+moved from a typed endpoint to advancing the corresponding catalog step, with the
+payload/validation now living in a registered validator + the step activity. Kept for
+reference; greppable by `RETIRED(generic-steps)`.
+
+### ~~POST /v1/onboarding/organisation~~ — RETIRED(generic-steps)
+
+Replaced by `POST /v1/onboarding/steps/ORGANISATION_CREATED` with
+`{ "input": { "display_name": "...", "tnc_accepted": "..." } }`. Previously: started the
+workflow if absent, created the org via the `CreateOrganisation` activity, recorded
+`ORGANISATION_CREATED`; required non-empty `display_name` + `tnc_accepted`; returned `202`
+with `run_id`.
+
+### ~~POST /v1/onboarding/complete~~ — RETIRED(generic-steps)
+
+Replaced by `POST /v1/onboarding/steps/ONBOARDING_COMPLETED` (no input). Previously:
+signalled completion so the user proceeds to the homepage while Svix/Lago provisioning
+runs independently; returned `202` with `run_id`.

@@ -242,7 +242,8 @@ func Wire() (*Container, error) {
 	// if err != nil {
 	// 	return nil, fmt.Errorf("failed to init auth /me client: %w", err)
 	// }
-	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter)
+	stepValidators := controller.NewValidatorRegistry(verticalCache)
+	onboardingCtrl := controller.NewOnboardingController(impl.NewOnboardingService(journeyRepo), starter, stepValidators)
 
 	// internal endpoint (Auth Service only) — starts/signals the workflow.
 	internalCtrl := controller.NewInternalOnboardingController(starter, obsMetrics)

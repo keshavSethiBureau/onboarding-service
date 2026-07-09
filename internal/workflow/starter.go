@@ -97,13 +97,29 @@ func (s *Starter) SubmitStep(ctx context.Context, userID, _ /*orgID*/, stepName 
 	return s.signalStep(ctx, userID, stepName, SignalPayload{})
 }
 
-// RequestOrganisation signals the ORGANISATION_CREATED step with the display name
-// and the user's T&C acceptance.
-func (s *Starter) RequestOrganisation(ctx context.Context, userID, displayName, tncAccepted string) (string, error) {
-	return s.signalStep(ctx, userID, StepOrganisationCreated, SignalPayload{DisplayName: displayName, TncAccepted: tncAccepted})
+// SignalStep delivers a user-input step's signal (with its payload) to an
+// EXISTING workflow — no start. This is the primitive the generic step endpoint
+// (POST /v1/onboarding/steps/{step_name}) uses: the journey already exists
+// (created by GET /v1/onboarding/state), so we only signal. A duplicate signal
+// for a step the workflow has already passed is ignored by Temporal (idempotent).
+func (s *Starter) SignalStep(ctx context.Context, userID, stepName string, payload SignalPayload) error {
+	ctx, cancel := context.WithTimeout(ctx, submitTimeout)
+	defer cancel()
+	return s.client.SignalWorkflow(ctx, userID, "", stepName, payload)
 }
 
-// RequestComplete signals the ONBOARDING_COMPLETED step.
-func (s *Starter) RequestComplete(ctx context.Context, userID string) (string, error) {
-	return s.signalStep(ctx, userID, StepOnboardingCompleted, SignalPayload{})
-}
+// RETIRED(generic-steps): the typed RequestOrganisation / RequestComplete signal
+// helpers are retired — organisation creation and completion now advance their
+// catalog steps (ORGANISATION_CREATED, ONBOARDING_COMPLETED) via SignalStep from
+// the generic endpoint. Retained commented per the removal convention.
+//
+// // RequestOrganisation signals the ORGANISATION_CREATED step with the display name
+// // and the user's T&C acceptance.
+// func (s *Starter) RequestOrganisation(ctx context.Context, userID, displayName, tncAccepted string) (string, error) {
+// 	return s.signalStep(ctx, userID, StepOrganisationCreated, SignalPayload{DisplayName: displayName, TncAccepted: tncAccepted})
+// }
+//
+// // RequestComplete signals the ONBOARDING_COMPLETED step.
+// func (s *Starter) RequestComplete(ctx context.Context, userID string) (string, error) {
+// 	return s.signalStep(ctx, userID, StepOnboardingCompleted, SignalPayload{})
+// }

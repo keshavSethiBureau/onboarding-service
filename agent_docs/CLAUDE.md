@@ -100,9 +100,26 @@ Data flow on read:  Mongo -> repo.XDoc -> adapters.FromRepoX -> dto.X -> view.Re
 - Every /v1 route validates the Auth0 JWT LOCALLY (signature, expiry, issuer, audience
   via cached JWKS — use commons/standard middleware, don't hand-roll). Never delegate
   token validation to the Auth Service.
-- Org creation is owned by THIS service: `POST /v1/onboarding/organisation` calls
-  Auth0 to create the org (idempotent CreateOrganisation activity), records
-  ORGANISATION_CREATED, then runs the migrated post-org setup activities.
+- User-input steps advance via `POST /v1/onboarding/steps/{step_name}` (generic,
+  catalog-driven, payload in `body.input`). Only `GET /v1/onboarding/state` and the
+  internal steps endpoint are separate user entry points.
+- Adding a user-input step = catalog data + a step activity + (if it has input) a
+  registered validator. NEVER a new controller.
+- Per-step input validation lives in a validator registry (step name → validate
+  function) that the generic endpoint looks up — not in per-step controllers and not
+  scattered in activities. Steps with no user input need no validator.
+- The generic endpoint validates the step is in the user's pinned catalog and is the
+  current step (reject out-of-order, 409), and is idempotent (re-submitting a completed
+  step returns state).
+- Org creation is owned by THIS service: advancing `ORGANISATION_CREATED` via the
+  generic step endpoint (`POST /v1/onboarding/steps/ORGANISATION_CREATED`, input
+  `{display_name, tnc_accepted}`) runs the idempotent CreateOrganisation activity (calls
+  Auth0), records ORGANISATION_CREATED, then runs the migrated post-org setup activities.
+- RETIRED(generic-steps): the typed `POST /v1/onboarding/organisation` and
+  `POST /v1/onboarding/complete` endpoints are retired — organisation creation and
+  completion are now driven by advancing their catalog steps (ORGANISATION_CREATED,
+  ONBOARDING_COMPLETED) via the generic endpoint. Only the trigger changed; catalog
+  contents and end-of-workflow provisioning behaviour are unchanged.
 - The migrated post-org setup steps/activities are derived by reading the Auth
   Service's org-creation flow — never invented.
 - The Mongo journey doc is a read-model kept current by the PersistJourneyState activity —

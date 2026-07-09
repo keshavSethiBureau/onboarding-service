@@ -50,13 +50,17 @@ func driveAllSignals(t *testing.T, starter *Starter, client interface {
 	if _, err := starter.SubmitStep(ctx, userID, "", StepEmailVerified); err != nil {
 		t.Fatalf("EMAIL_VERIFIED: %v", err)
 	}
-	if _, err := starter.RequestOrganisation(ctx, userID, "Acme Inc", "true"); err != nil {
+	// Advance the user-input steps via the generic SignalStep path (the workflow
+	// already exists — SubmitStep started it). This is what POST /steps/{step}
+	// drives in production.
+	if err := starter.SignalStep(ctx, userID, StepOrganisationCreated, SignalPayload{DisplayName: "Acme Inc", TncAccepted: "true"}); err != nil {
 		t.Fatalf("ORGANISATION_CREATED: %v", err)
 	}
-	_ = client.SignalWorkflow(ctx, userID, "", StepVerticalSelected, SignalPayload{VerticalName: "KYC"})
+	if err := starter.SignalStep(ctx, userID, StepVerticalSelected, SignalPayload{VerticalName: "KYC"}); err != nil {
+		t.Fatalf("VERTICAL_SELECTED: %v", err)
+	}
 	// REMOVED(questionnaire-dropped): QUESTIONNAIRE_VIEWED is no longer in the v1 catalog.
-	// _ = client.SignalWorkflow(ctx, userID, "", StepQuestionnaireViewed, SignalPayload{})
-	if _, err := starter.RequestComplete(ctx, userID); err != nil {
+	if err := starter.SignalStep(ctx, userID, StepOnboardingCompleted, SignalPayload{}); err != nil {
 		t.Fatalf("ONBOARDING_COMPLETED: %v", err)
 	}
 }
