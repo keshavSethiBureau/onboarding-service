@@ -1,0 +1,10 @@
+# Keep the build context small + never ship these into the image.
+.git
+.github
+.dockerignore
+Dockerfile
+*.md
+agent_docs
+readme
+deployments
+overwatch-authentication-service

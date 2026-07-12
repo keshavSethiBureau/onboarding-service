@@ -1,0 +1,169 @@
+name: Deploy Onboarding Service On K8S
+on:
+  workflow_call:
+    inputs:
+      REGION:
+        required: true
+        type: string
+      PROJECT_PREFIX:
+        required: true
+        type: string
+      SERVICE_NAME:
+        required: true
+        type: string
+      ENV:
+        required: true
+        type: string
+      NAMESPACE:
+        required: true
+        type: string
+      IAM_ROLE:
+        required: true
+        type: string
+      DEPLOYMENT_FILE_PATH:
+        required: true
+        type: string
+    secrets:
+      ACCESS_TOKEN:
+        required: true
+      ARGO_GITHUB_PAT:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set build env
+        id: build_env
+        shell: bash
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          {
+            echo "BRANCH=$BRANCH"
+            echo "ECR_REPO=${{ inputs.PROJECT_PREFIX }}-${{ inputs.ENV }}-mb-ecr-${{ inputs.SERVICE_NAME }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.IAM_ROLE }}
+          role-duration-seconds: 900
+          aws-region: ${{ inputs.REGION }}
+
+      - name: Generate ECR image tag
+        id: image_tag
+        shell: bash
+        run: |
+          SHA="$(git rev-parse --verify HEAD)"
+          echo "IMAGE_TAG_FULL=${{ inputs.ENV }}-${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build, Tag, and Push Multi-Architecture Docker image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.build_env.outputs.ECR_REPO }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.IMAGE_TAG_FULL }}
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -f Dockerfile \
+            --build-arg githubAccessToken=${{ secrets.ACCESS_TOKEN }} \
+            --push \
+            .
+
+          echo "🎯 Multi-architecture image built and pushed successfully!"
+          echo "📦 Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout k8s-manifests repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/k8s-manifests
+          ref: main
+          token: ${{ secrets.ARGO_GITHUB_PAT }}
+          fetch-depth: 0
+          path: k8s-manifests
+
+      - name: Inspect multi-architecture manifest
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.build_env.outputs.ECR_REPO }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.IMAGE_TAG_FULL }}
+        run: |
+          echo "🔍 Inspecting multi-architecture manifest:"
+          docker buildx imagetools inspect $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Update Kubernetes manifest
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.build_env.outputs.ECR_REPO }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.IMAGE_TAG_FULL }}
+        run: |
+          NEW_IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          DEPLOYMENT_FILE="k8s-manifests/${{ inputs.DEPLOYMENT_FILE_PATH }}"
+
+          echo "🔄 Updating deployment manifest..."
+          echo "📁 File: $DEPLOYMENT_FILE"
+          echo "🐳 New Image: $NEW_IMAGE"
+
+          sed -i "s|image: .*|image: $NEW_IMAGE|g" $DEPLOYMENT_FILE
+
+          echo "✅ Updated image in $DEPLOYMENT_FILE:"
+          grep "image:" $DEPLOYMENT_FILE
+
+      - name: Commit and push manifest changes
+        env:
+          ENV: ${{ inputs.ENV }}
+          SERVICE_NAME: ${{ inputs.SERVICE_NAME }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.IMAGE_TAG_FULL }}
+        run: |
+          cd k8s-manifests
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          git add ${{ inputs.DEPLOYMENT_FILE_PATH }}
+
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit"
+          else
+            git commit -m "🚀 Update ${{ inputs.DEPLOYMENT_FILE_PATH }} deployment image to $IMAGE_TAG
+
+            - Environment: $ENV
+            - Service: $SERVICE_NAME
+            - Deployment File: ${{ inputs.DEPLOYMENT_FILE_PATH }}
+            - Image Tag: $IMAGE_TAG
+            - Auto-updated by GitHub Actions
+            - Commit: ${{ github.sha }}"
+
+            git push
+            echo "✅ Pushed manifest changes to k8s-manifests repository"
+            echo "🔄 ArgoCD will automatically sync these changes to the cluster"
+          fi
+
+      - name: Deployment Summary
+        if: always()
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.build_env.outputs.ECR_REPO }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.IMAGE_TAG_FULL }}
+        run: |
+          echo "🎯 GitOps Deployment Summary:"
+          echo "├── Service: ${{ inputs.SERVICE_NAME }}"
+          echo "├── Environment: ${{ inputs.ENV }}"
+          echo "├── Multi-arch Image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "├── Namespace: ${{ inputs.NAMESPACE }}"
+          echo "├── Manifest Updated: ${{ inputs.DEPLOYMENT_FILE_PATH }} (in k8s-manifests repo)"
+          echo "└── 🚀 ArgoCD will automatically deploy to cluster"

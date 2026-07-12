@@ -1,0 +1,35 @@
+name: Onboarding Service CI-CD dev k8s
+
+on:
+  push:
+    paths-ignore:
+      - 'agent_docs/**'
+      - 'readme/**'
+      - 'docs/**'
+      - '**.md'
+      - 'k8s/**'
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-and-push-ap-south-1:
+    name: Deploy to ap-south-1
+    uses: ./.github/workflows/deploy.yml
+    with:
+      REGION: ap-south-1
+      PROJECT_PREFIX: orch
+      NAMESPACE: platform
+      # ECR repo resolves to orch-dev-mb-ecr-platform-onboarding (confirmed to exist).
+      SERVICE_NAME: platform-onboarding
+      ENV: dev
+      IAM_ROLE: arn:aws:iam::658114288543:role/GithubActionsRole
+      # VERIFY: this path must exist in the k8s-manifests repo.
+      DEPLOYMENT_FILE_PATH: dev/platform-onboarding/deployment.yaml
+    secrets:
+      ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+      ARGO_GITHUB_PAT: ${{ secrets.ARGO_GITHUB_PAT }}

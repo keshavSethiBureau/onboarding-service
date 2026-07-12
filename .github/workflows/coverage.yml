@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+  # CodeAnt (disabled — repo not onboarded yet) also needs: statuses: write
+
+jobs:
+  build-test-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Configure Git for private Go modules
+        run: |
+          git config --global url."https://${{ secrets.ACCESS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Set GOPRIVATE
+        run: echo "GOPRIVATE=github.com/Bureau-Inc/*" >> $GITHUB_ENV
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Unit + in-memory testsuite tests run in CI; the Mongo/Temporal integration
+      # tests skip automatically when those dependencies are unreachable.
+      - name: Run tests with coverage (Go)
+        run: |
+          go test -coverprofile=coverage.out $(go list ./... | grep -v cmd/server)
+
+      # CodeAnt (disabled — repo not onboarded to CodeAnt yet). Re-enable the steps
+      # below + `statuses: write` above + the quality-gate job once onboarded.
+      # - name: Convert Go coverage to Cobertura XML
+      #   run: |
+      #     go install github.com/axw/gocov/gocov@latest
+      #     go install github.com/AlekSi/gocov-xml@latest
+      #     gocov convert coverage.out | gocov-xml > coverage.xml
+      #
+      # - name: Upload coverage to CodeAnt AI
+      #   uses: CodeAnt-AI/codeant-coverage-action@v0.0.5
+      #   with:
+      #     access_token: ${{ secrets.ACCESS_TOKEN }}
+      #     coverage_file: coverage.xml
+      #     platform: github
+      #     api_base: 'https://api.codeant.ai'
+      #     base_url: 'https://github.com'
+
+  # CodeAnt (disabled — repo not onboarded yet). Re-enable once onboarded.
+  # quality-gate:
+  #   name: Quality Gate Scan
+  #   needs: build-test-coverage        # ensure coverage is uploaded first
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Run CodeAnt Quality Gate Scan
+  #       uses: CodeAnt-AI/codeant-quality-gates@v0.0.2
+  #       with:
+  #         access_token: ${{ secrets.ACCESS_TOKEN }}
+  #         api_base: https://api.codeant.ai
+  #         timeout: 600
+  #         poll_interval: 15
