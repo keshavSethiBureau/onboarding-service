@@ -1,2 +1,6 @@
 # Local reference copy of the auth service (not part of this module)
 /overwatch-authentication-service/
+
+# Vendored infra repos (infra-terraform-resource, k8s-manifests) — separate repos
+# checked out here only for reference; never tracked by this module.
+/infraSetup/
